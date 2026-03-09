@@ -9,14 +9,25 @@ import (
 )
 
 // Config menyimpan semua konfigurasi aplikasi.
-// Semua validasi dan default value ditangani di sini sehingga
-// kode lain tidak perlu tahu dari mana konfigurasi berasal.
+//
+// Semua validasi, default value, dan parsing environment variable ada di sini.
+// Ini menerapkan prinsip "define errors out of existence" — caller yang
+// menerima *Config dijamin mendapat state yang valid dan lengkap,
+// tidak perlu melakukan validasi sendiri.
 type Config struct {
-	GeminiAPIKey    string
-	GeminiModel     string
-	SystemPrompt    string
+	GeminiAPIKey     string
+	GeminiModel      string
+	SystemPrompt     string
 	AllowedGroupJIDs []string
-	MaxHistory      int
+	MaxHistory       int
+
+	// DOKU Checkout
+	DokuClientID    string
+	DokuSecretKey   string
+	DokuIsSandbox   bool
+	DokuWebhookPort string
+	DokuWebhookURL  string // URL publik untuk notification (misal: https://xxx.ngrok-free.app/doku/webhook)
+	DokuEnabled     bool   // true jika semua config DOKU terisi
 }
 
 // LoadConfig membaca konfigurasi dari .env dan environment variables.
@@ -64,14 +75,36 @@ func LoadConfig() (*Config, error) {
 6. Jawab secara ringkas tapi informatif, jangan terlalu panjang kecuali diminta detail.`
 	}
 
-	maxHistory := 20 // Bisa di-override via env kalau perlu nanti
+	maxHistory := 20
+
+	// DOKU Config — opsional. Jika tidak diisi, fitur donasi tidak aktif
+	// tapi bot tetap berjalan normal. Ini menerapkan prinsip graceful
+	// degradation — fitur tambahan tidak boleh merusak fungsi inti.
+	dokuClientID := os.Getenv("DOKU_CLIENT_ID")
+	dokuSecretKey := os.Getenv("DOKU_SECRET_KEY")
+	dokuSandbox := os.Getenv("DOKU_SANDBOX")
+	dokuWebhookPort := os.Getenv("DOKU_WEBHOOK_PORT")
+	dokuWebhookURL := os.Getenv("DOKU_WEBHOOK_URL")
+
+	if dokuWebhookPort == "" {
+		dokuWebhookPort = "8080"
+	}
+
+	dokuEnabled := dokuClientID != "" && dokuSecretKey != ""
 
 	return &Config{
-		GeminiAPIKey:    apiKey,
-		GeminiModel:     model,
-		SystemPrompt:    systemPrompt,
+		GeminiAPIKey:     apiKey,
+		GeminiModel:      model,
+		SystemPrompt:     systemPrompt,
 		AllowedGroupJIDs: allowedJIDs,
-		MaxHistory:      maxHistory,
+		MaxHistory:       maxHistory,
+
+		DokuClientID:    dokuClientID,
+		DokuSecretKey:   dokuSecretKey,
+		DokuIsSandbox:   dokuSandbox == "" || dokuSandbox == "true" || dokuSandbox == "1",
+		DokuWebhookPort: dokuWebhookPort,
+		DokuWebhookURL:  dokuWebhookURL,
+		DokuEnabled:     dokuEnabled,
 	}, nil
 }
 

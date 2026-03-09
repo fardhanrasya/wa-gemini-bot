@@ -2,3 +2,5 @@
 wa-session.db
 *.exe
 *.db
+*.key
+*.pem

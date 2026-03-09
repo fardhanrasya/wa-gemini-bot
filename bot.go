@@ -18,22 +18,34 @@ import (
 // Trigger sqlite3 driver registration
 var _ sqlite3.SQLiteDriver
 
-// Bot mengelola WhatsApp client dan menghubungkannya dengan AI dan memori.
+// Bot mengelola WhatsApp client dan menghubungkannya dengan AI, memori, dan payment.
 //
-// Desain: Bot bertanggung jawab atas semua interaksi WhatsApp.
-// AI dan memori disuntikkan (dependency injection) melalui constructor,
-// bukan diakses via global — ini membuat setiap komponen bisa diuji dan
-// diganti secara independen.
+// Desain: Bot adalah "orchestrator" yang menghubungkan modul-modul independen.
+// Setiap modul (AI, Memory, Doku) tidak saling kenal — mereka hanya berkomunikasi
+// melalui Bot. Ini menerapkan prinsip "separate general-purpose from special-purpose":
+// modul-modul bersifat general-purpose, Bot yang menambahkan konteks WhatsApp.
 type Bot struct {
 	client *whatsmeow.Client
 	ai     *AIService
 	memory *GroupMemory
 	config *Config
+	doku   *DokuService // nil jika fitur donasi tidak aktif
+}
+
+// eventContext mengumpulkan data yang sudah di-parse dari satu pesan masuk.
+// Menghindari "pass-through" parameter yang sama ke banyak method —
+// sesuai prinsip mengurangi complexity yang terlihat di interface.
+type eventContext struct {
+	msg        *events.Message
+	chatJID    string
+	senderName string
+	cleanText  string
 }
 
 // NewBot membuat Bot baru yang siap di-Start().
-// Menanggung semua kompleksitas: setup database, device store, dan WhatsApp client.
-func NewBot(cfg *Config, ai *AIService, mem *GroupMemory) (*Bot, error) {
+// Constructor ini "deep" — menyembunyikan semua setup database, device store,
+// dan event wiring. Caller hanya perlu pass dependency, lalu Start().
+func NewBot(cfg *Config, ai *AIService, mem *GroupMemory, doku *DokuService) (*Bot, error) {
 	ctx := context.Background()
 
 	dbLog := waLog.Stdout("Database", "WARN", true)
@@ -55,16 +67,21 @@ func NewBot(cfg *Config, ai *AIService, mem *GroupMemory) (*Bot, error) {
 		ai:     ai,
 		memory: mem,
 		config: cfg,
+		doku:   doku,
 	}
 
 	client.AddEventHandler(bot.handleEvent)
+
+	// Daftarkan callback pembayaran — mengunci siklus "DOKU → Bot → WhatsApp"
+	if doku != nil {
+		doku.SetPaymentCallback(bot.handlePaymentSuccess)
+	}
 
 	return bot, nil
 }
 
 // Start menghubungkan bot ke WhatsApp.
 // Jika belum login, menampilkan QR code untuk di-scan.
-// Jika sudah login sebelumnya, langsung connect.
 func (b *Bot) Start() error {
 	if b.client.Store.ID == nil {
 		return b.connectWithQR()
@@ -77,7 +94,7 @@ func (b *Bot) Stop() {
 	b.client.Disconnect()
 }
 
-// connectWithQR menampilkan QR code dan menunggu sampai login berhasil.
+// connectWithQR menampilkan QR code dan menunggu login berhasil.
 func (b *Bot) connectWithQR() error {
 	qrChan, _ := b.client.GetQRChannel(context.Background())
 	if err := b.client.Connect(); err != nil {
@@ -96,11 +113,11 @@ func (b *Bot) connectWithQR() error {
 }
 
 // ==========================================================================
-// Event handling — semua logika "apa yang terjadi saat ada pesan" ada di sini.
-// Method-method di bawah ini private karena merupakan detail internal Bot.
+// Message handling — alur pemrosesan pesan menggunakan "guard clauses"
+// yang mengeliminasi kasus-kasus tidak relevan lebih dulu, sehingga
+// happy path tetap flat dan mudah dibaca (tidak nested).
 // ==========================================================================
 
-// handleEvent adalah entry point untuk semua event WhatsApp.
 func (b *Bot) handleEvent(evt interface{}) {
 	switch v := evt.(type) {
 	case *events.Message:
@@ -108,9 +125,14 @@ func (b *Bot) handleEvent(evt interface{}) {
 	}
 }
 
-// handleMessage memproses satu pesan masuk.
-// Alur logikanya disusun sebagai "guard clauses" yang mengeliminasi
-// kasus-kasus yang tidak perlu diproses, sehingga happy path tetap flat.
+// handleMessage adalah brain dari Bot — memproses satu pesan masuk.
+// Setiap guard clause mengeliminasi satu kasus:
+//   1. Pesan dari bot sendiri → skip
+//   2. Bukan dari grup → skip
+//   3. Grup tidak di-whitelist → skip
+//   4. Bot tidak di-mention → rekam saja, jangan balas
+//   5. Perintah donasi → handle khusus
+//   6. Selebihnya → tanya AI
 func (b *Bot) handleMessage(v *events.Message) {
 	if v.Info.IsFromMe || !v.Info.IsGroup {
 		return
@@ -124,13 +146,12 @@ func (b *Bot) handleMessage(v *events.Message) {
 	senderName := senderNameFrom(v)
 	rawText := rawTextFrom(v)
 
-	// Rekam semua pesan — bot "menyimak" bahkan kalau tidak di-tag
+	// Rekam semua pesan — bot "menyimak" meskipun tidak di-tag
 	if rawText != "" {
 		b.memory.Record(chatJID, senderName, rawText)
 		log.Printf("[REKAM] %s: %s", senderName, rawText)
 	}
 
-	// Hanya proses lebih lanjut kalau bot di-mention
 	if !b.isMentioningMe(v) {
 		return
 	}
@@ -142,12 +163,29 @@ func (b *Bot) handleMessage(v *events.Message) {
 
 	log.Printf("[TANYA] %s: %s", senderName, cleanText)
 
-	// Bangun prompt dengan konteks obrolan
+	// Bangun event context — menghindari pass-through banyak parameter
+	ctx := &eventContext{
+		msg:        v,
+		chatJID:    chatJID,
+		senderName: senderName,
+		cleanText:  cleanText,
+	}
+
+	// Dispatch ke handler yang sesuai
+	if b.doku != nil && b.handleDonation(ctx, cleanText) {
+		return
+	}
+
+	b.handleAIQuery(ctx)
+}
+
+// handleAIQuery mengirim pertanyaan ke AI dengan konteks obrolan grup.
+func (b *Bot) handleAIQuery(ctx *eventContext) {
 	prompt := fmt.Sprintf(
 		"%s\n\nPesan dari %s:\n%s",
-		b.memory.GetContext(chatJID),
-		senderName,
-		cleanText,
+		b.memory.GetContext(ctx.chatJID),
+		ctx.senderName,
+		ctx.cleanText,
 	)
 
 	reply, err := b.ai.Ask(prompt)
@@ -156,27 +194,26 @@ func (b *Bot) handleMessage(v *events.Message) {
 		reply = "Waduh, otak AI-ku lagi error nih. 😵"
 	}
 
-	b.sendReply(v, reply)
-	b.memory.Record(chatJID, "Abdul (Bot)", reply)
+	b.sendReply(ctx.msg, reply)
+	b.memory.Record(ctx.chatJID, "Abdul (Bot)", reply)
 }
+
+// ==========================================================================
+// WhatsApp utilities — fungsi-fungsi kecil yang mengekstrak data dari
+// pesan WhatsApp. Dipisah agar handleMessage tetap readable.
+// ==========================================================================
 
 // sendReply mengirim pesan balasan ke chat yang sama.
 func (b *Bot) sendReply(v *events.Message, text string) {
-	_, err := b.client.SendMessage(context.Background(), v.Info.Chat, &waProto.Message{
+	if _, err := b.client.SendMessage(context.Background(), v.Info.Chat, &waProto.Message{
 		Conversation: proto.String(text),
-	})
-	if err != nil {
+	}); err != nil {
 		log.Printf("Gagal kirim pesan: %v", err)
 	}
 }
 
-// ==========================================================================
-// Utility functions — operasi kecil yang mengekstrak data dari pesan WhatsApp.
-// Dibuat sebagai fungsi agar mudah dipahami dan diuji secara terpisah.
-// ==========================================================================
-
 // isMentioningMe memeriksa apakah pesan menyebut bot.
-// Menggunakan baik Phone JID maupun LID karena WhatsApp menggunakan
+// Menggunakan Phone JID dan LID karena WhatsApp menggunakan
 // format berbeda tergantung versi dan addressing mode.
 func (b *Bot) isMentioningMe(v *events.Message) bool {
 	identifiers := b.myIdentifiers()
@@ -196,8 +233,8 @@ func (b *Bot) isMentioningMe(v *events.Message) bool {
 	return false
 }
 
-// myIdentifiers mengembalikan semua identifier yang bisa dipakai untuk
-// mencocokkan mention ke bot ini (Phone number + LID).
+// myIdentifiers mengembalikan semua identifier yang bisa dipakai
+// untuk mencocokkan mention ke bot ini.
 func (b *Bot) myIdentifiers() []string {
 	var ids []string
 	if b.client.Store.ID != nil {

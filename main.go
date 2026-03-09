@@ -7,10 +7,15 @@ import (
 	"syscall"
 )
 
-// main hanyalah "wiring" — menyambungkan module-module yang sudah didesain
-// agar masing-masing bisa berdiri sendiri. Tidak ada business logic di sini.
+// main hanyalah "wiring" — menyambungkan modul-modul yang berdiri sendiri.
+// Tidak ada business logic di sini, hanya urutan inisialisasi.
 //
-// Alur: Config → AI Service → Memory → Bot → Start → Wait → Stop
+// Alur: Config → AI → Memory → [DOKU] → Bot → Start → Wait → Stop
+//
+// Setiap modul menerima dependency-nya via constructor (dependency injection).
+// Ini membuat main.go menjadi satu-satunya tempat yang tahu tentang semua modul,
+// sementara modul-modul itu sendiri tidak saling kenal — sesuai prinsip
+// "reduce the number of places where each piece of knowledge is used."
 func main() {
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -26,7 +31,19 @@ func main() {
 
 	memory := NewGroupMemory(cfg.MaxHistory)
 
-	bot, err := NewBot(cfg, ai, memory)
+	// DOKU — opsional, aktif hanya jika config terisi.
+	// NewDokuService menerima *Config langsung (bukan struct perantara)
+	// sehingga tidak ada information leakage antara Config dan DokuService.
+	var doku *DokuService
+	if cfg.DokuEnabled {
+		doku = NewDokuService(cfg)
+		log.Printf("DOKU Checkout ready (sandbox: %v, webhook port: %s)", cfg.DokuIsSandbox, cfg.DokuWebhookPort)
+		go doku.StartWebhookServer(cfg.DokuWebhookPort)
+	} else {
+		log.Println("DOKU tidak aktif — fitur donasi dinonaktifkan (set DOKU_* env vars untuk mengaktifkan)")
+	}
+
+	bot, err := NewBot(cfg, ai, memory, doku)
 	if err != nil {
 		log.Fatalf("Bot error: %v", err)
 	}
