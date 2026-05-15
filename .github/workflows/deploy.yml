@@ -21,7 +21,7 @@ jobs:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
         with:
-          host: 3.212.49.32
+          host: 13.212.49.32
           username: ubuntu
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
