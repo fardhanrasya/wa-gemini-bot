@@ -1,0 +1,60 @@
+# Deploy bot ke server via SSH.
+#
+# Alur sederhana: SSH ke server → git pull → go build → restart proses.
+# Go dan source code sudah ada di server, jadi tidak perlu cross-compile.
+#
+# Secrets yang perlu diset di GitHub Repository Settings > Secrets:
+#   - SSH_PRIVATE_KEY : Isi private key SSH (format OpenSSH)
+
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to Server
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H 3.212.49.32 >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ubuntu@3.212.49.32 << 'EOF'
+          set -e
+
+          cd ~/wa-gemini-bot
+
+          echo "==> Pulling latest code..."
+          git pull origin main
+
+          echo "==> Building..."
+          go build -o bot ./cmd/bot/
+
+          echo "==> Stopping old process..."
+          pkill -f './bot' || true
+          sleep 2
+
+          echo "==> Starting bot..."
+          nohup ./bot > bot.log 2>&1 &
+
+          sleep 3
+          if pgrep -f './bot' > /dev/null; then
+            echo "==> ✅ Bot is running! (PID: $(pgrep -f './bot'))"
+          else
+            echo "==> ❌ Bot failed to start. Last 20 lines of log:"
+            tail -20 bot.log
+            exit 1
+          fi
+          EOF
+
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
