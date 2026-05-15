@@ -33,18 +33,21 @@ jobs:
             git pull origin master
 
             echo "==> Building..."
-            go build -o bot ./cmd/bot/
+            # Ubah nama output binary agar lebih unik
+            go build -o wa-gemini-bot ./cmd/bot/
 
             echo "==> Stopping old process..."
-            pkill -f './bot' || true
+            # Gunakan -x untuk exact match nama proses, bukan -f
+            pkill -x 'wa-gemini-bot' || true
             sleep 2
 
             echo "==> Starting bot..."
-            nohup ./bot > bot.log 2>&1 &
+            nohup ./wa-gemini-bot > bot.log 2>&1 &
 
             sleep 3
-            if pgrep -f './bot' > /dev/null; then
-              echo "==> ✅ Bot is running! (PID: $(pgrep -f './bot'))"
+            # Gunakan -x di pgrep juga
+            if pgrep -x 'wa-gemini-bot' > /dev/null; then
+              echo "==> ✅ Bot is running! (PID: $(pgrep -x 'wa-gemini-bot'))"
             else
               echo "==> ❌ Bot failed to start. Last 20 lines of log:"
               tail -20 bot.log
