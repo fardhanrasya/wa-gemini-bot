@@ -1,8 +1,9 @@
-package main
+package config
 
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -28,6 +29,11 @@ type Config struct {
 	DokuWebhookPort string
 	DokuWebhookURL  string // URL publik untuk notification (misal: https://xxx.ngrok-free.app/doku/webhook)
 	DokuEnabled     bool   // true jika semua config DOKU terisi
+
+	// Trivia Quiz
+	TriviaEnabled          bool
+	TriviaIntervalMinutes  int
+	TriviaAnswerTimeoutSec int
 }
 
 // LoadConfig membaca konfigurasi dari .env dan environment variables.
@@ -92,6 +98,21 @@ func LoadConfig() (*Config, error) {
 
 	dokuEnabled := dokuClientID != "" && dokuSecretKey != ""
 
+	// Trivia Config — opsional. Default: nonaktif.
+	triviaEnabled := os.Getenv("TRIVIA_ENABLED") == "true" || os.Getenv("TRIVIA_ENABLED") == "1"
+	triviaInterval := 30 // default 30 menit
+	if v := os.Getenv("TRIVIA_INTERVAL_MINUTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			triviaInterval = n
+		}
+	}
+	triviaTimeout := 1200 // default 1200 detik
+	if v := os.Getenv("TRIVIA_ANSWER_TIMEOUT_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			triviaTimeout = n
+		}
+	}
+
 	return &Config{
 		GeminiAPIKey:     apiKey,
 		GeminiModel:      model,
@@ -105,6 +126,10 @@ func LoadConfig() (*Config, error) {
 		DokuWebhookPort: dokuWebhookPort,
 		DokuWebhookURL:  dokuWebhookURL,
 		DokuEnabled:     dokuEnabled,
+
+		TriviaEnabled:          triviaEnabled,
+		TriviaIntervalMinutes:  triviaInterval,
+		TriviaAnswerTimeoutSec: triviaTimeout,
 	}, nil
 }
 

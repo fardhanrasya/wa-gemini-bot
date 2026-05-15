@@ -4,3 +4,4 @@ wa-session.db
 *.db
 *.key
 *.pem
+.agents

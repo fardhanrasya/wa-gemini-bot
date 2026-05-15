@@ -1,4 +1,4 @@
-package main
+package ai
 
 import (
 	"context"
@@ -73,6 +73,37 @@ func (ai *AIService) Ask(prompt string) (string, error) {
 	return extractTextFromResponse(resp), nil
 }
 
+// AnalyzeImage mengirim prompt dan data gambar ke Gemini.
+// Berguna untuk fitur Vision: "ini foto apa?", OCR, atau estimasi kalori.
+func (ai *AIService) AnalyzeImage(prompt string, imageData []byte, mimeType string) (string, error) {
+	contents := []*genai.Content{
+		{
+			Role: "user",
+			Parts: []*genai.Part{
+				{
+					InlineData: &genai.Blob{
+						MIMEType: mimeType,
+						Data:     imageData,
+					},
+				},
+				{Text: prompt},
+			},
+		},
+	}
+
+	resp, err := ai.client.Models.GenerateContent(
+		context.Background(),
+		ai.model,
+		contents,
+		ai.config,
+	)
+	if err != nil {
+		return "", fmt.Errorf("gemini vision error: %w", err)
+	}
+
+	return extractTextFromResponse(resp), nil
+}
+
 // extractTextFromResponse mengekstrak teks dari response struct Gemini.
 // Fungsi private — detail internal tentang bagaimana SDK menyimpan respons.
 func extractTextFromResponse(resp *genai.GenerateContentResponse) string {
@@ -87,7 +118,20 @@ func extractTextFromResponse(resp *genai.GenerateContentResponse) string {
 
 	var parts []string
 	for _, part := range candidate.Content.Parts {
-		if part.Text != "" {
+		// Filter 1: Lewati "pikiran" internal model (Thought).
+		// Gemini 2.0+ sering mengirimkan proses berpikir sebagai part terpisah.
+		if part.Thought {
+			continue
+		}
+
+		// Filter 2: Pastikan part adalah teks murni dan bukan metadata tool.
+		// Sesuai dokumentasi SDK, hanya satu field yang boleh terisi dalam satu Part.
+		// Jadi kita hanya ambil part yang punya .Text dan bukan hasil/panggilan tool.
+		if part.Text != "" && 
+			part.FunctionCall == nil && 
+			part.ExecutableCode == nil && 
+			part.FunctionResponse == nil && 
+			part.CodeExecutionResult == nil {
 			parts = append(parts, part.Text)
 		}
 	}

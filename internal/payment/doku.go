@@ -1,4 +1,4 @@
-package main
+package payment
 
 import (
 	"crypto/hmac"
@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"wa-gemini-bot/internal/config"
 )
 
 // ==========================================================================
@@ -69,7 +71,7 @@ type pendingDonation struct {
 // NewDokuService membuat DokuService yang siap pakai.
 // Menerima Config langsung sehingga caller (main.go) tidak perlu
 // "membongkar" config ke struct perantara — mengurangi information leakage.
-func NewDokuService(cfg *Config) *DokuService {
+func NewDokuService(cfg *config.Config) *DokuService {
 	baseURL := "https://api.doku.com"
 	if cfg.DokuIsSandbox {
 		baseURL = "https://api-sandbox.doku.com"

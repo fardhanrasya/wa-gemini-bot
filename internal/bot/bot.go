@@ -1,4 +1,4 @@
-package main
+package bot
 
 import (
 	"context"
@@ -6,10 +6,17 @@ import (
 	"log"
 	"strings"
 
+	"wa-gemini-bot/internal/ai"
+	"wa-gemini-bot/internal/config"
+	"wa-gemini-bot/internal/memory"
+	"wa-gemini-bot/internal/payment"
+	"wa-gemini-bot/internal/trivia"
+
 	"github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
@@ -26,10 +33,11 @@ var _ sqlite3.SQLiteDriver
 // modul-modul bersifat general-purpose, Bot yang menambahkan konteks WhatsApp.
 type Bot struct {
 	client *whatsmeow.Client
-	ai     *AIService
-	memory *GroupMemory
-	config *Config
-	doku   *DokuService // nil jika fitur donasi tidak aktif
+	ai     *ai.AIService
+	memory *memory.GroupMemory
+	config *config.Config
+	doku   *payment.DokuService   // nil jika fitur donasi tidak aktif
+	trivia *trivia.TriviaService // nil jika fitur trivia tidak aktif
 }
 
 // eventContext mengumpulkan data yang sudah di-parse dari satu pesan masuk.
@@ -40,12 +48,14 @@ type eventContext struct {
 	chatJID    string
 	senderName string
 	cleanText  string
+	imageData  []byte
+	mimeType   string
 }
 
 // NewBot membuat Bot baru yang siap di-Start().
 // Constructor ini "deep" — menyembunyikan semua setup database, device store,
 // dan event wiring. Caller hanya perlu pass dependency, lalu Start().
-func NewBot(cfg *Config, ai *AIService, mem *GroupMemory, doku *DokuService) (*Bot, error) {
+func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku *payment.DokuService, trivia *trivia.TriviaService) (*Bot, error) {
 	ctx := context.Background()
 
 	dbLog := waLog.Stdout("Database", "WARN", true)
@@ -68,6 +78,7 @@ func NewBot(cfg *Config, ai *AIService, mem *GroupMemory, doku *DokuService) (*B
 		memory: mem,
 		config: cfg,
 		doku:   doku,
+		trivia: trivia,
 	}
 
 	client.AddEventHandler(bot.handleEvent)
@@ -75,6 +86,11 @@ func NewBot(cfg *Config, ai *AIService, mem *GroupMemory, doku *DokuService) (*B
 	// Daftarkan callback pembayaran — mengunci siklus "DOKU → Bot → WhatsApp"
 	if doku != nil {
 		doku.SetPaymentCallback(bot.handlePaymentSuccess)
+	}
+
+	// Daftarkan callback trivia — siklus "Trivia → Bot → WhatsApp"
+	if trivia != nil {
+		trivia.SetCallbacks(bot.sendToGroup, bot.sendPollToGroup, mem.Record)
 	}
 
 	return bot, nil
@@ -125,14 +141,6 @@ func (b *Bot) handleEvent(evt interface{}) {
 	}
 }
 
-// handleMessage adalah brain dari Bot — memproses satu pesan masuk.
-// Setiap guard clause mengeliminasi satu kasus:
-//   1. Pesan dari bot sendiri → skip
-//   2. Bukan dari grup → skip
-//   3. Grup tidak di-whitelist → skip
-//   4. Bot tidak di-mention → rekam saja, jangan balas
-//   5. Perintah donasi → handle khusus
-//   6. Selebihnya → tanya AI
 func (b *Bot) handleMessage(v *events.Message) {
 	if v.Info.IsFromMe || !v.Info.IsGroup {
 		return
@@ -140,6 +148,12 @@ func (b *Bot) handleMessage(v *events.Message) {
 
 	chatJID := v.Info.Chat.String()
 	if !b.config.IsAllowedGroup(chatJID) {
+		return
+	}
+
+	// Cek jika ini adalah update polling (vote)
+	if v.Message.GetPollUpdateMessage() != nil {
+		b.handlePollUpdate(v)
 		return
 	}
 
@@ -157,11 +171,36 @@ func (b *Bot) handleMessage(v *events.Message) {
 	}
 
 	cleanText := b.cleanedTextFrom(v)
-	if cleanText == "" {
+	// Jika tidak ada teks dan bukan pesan gambar, abaikan.
+	// Tapi jika ada gambar, kita tetap proses (mungkin user cuma tag "ini apa?").
+	if cleanText == "" && v.Message.GetImageMessage() == nil && v.Message.GetExtendedTextMessage().GetContextInfo().GetQuotedMessage().GetImageMessage() == nil {
 		return
 	}
 
 	log.Printf("[TANYA] %s: %s", senderName, cleanText)
+
+	// Deteksi gambar (baik langsung atau via reply)
+	var imageData []byte
+	var mimeType string
+	if img := v.Message.GetImageMessage(); img != nil {
+		data, err := b.client.Download(context.Background(), img)
+		if err != nil {
+			log.Printf("Gagal download gambar: %v", err)
+		} else {
+			imageData = data
+			mimeType = img.GetMimetype()
+		}
+	} else if quoted := v.Message.GetExtendedTextMessage().GetContextInfo().GetQuotedMessage(); quoted != nil {
+		if img := quoted.GetImageMessage(); img != nil {
+			data, err := b.client.Download(context.Background(), img)
+			if err != nil {
+				log.Printf("Gagal download gambar quoted: %v", err)
+			} else {
+				imageData = data
+				mimeType = img.GetMimetype()
+			}
+		}
+	}
 
 	// Bangun event context — menghindari pass-through banyak parameter
 	ctx := &eventContext{
@@ -169,6 +208,8 @@ func (b *Bot) handleMessage(v *events.Message) {
 		chatJID:    chatJID,
 		senderName: senderName,
 		cleanText:  cleanText,
+		imageData:  imageData,
+		mimeType:   mimeType,
 	}
 
 	// Dispatch ke handler yang sesuai
@@ -181,14 +222,28 @@ func (b *Bot) handleMessage(v *events.Message) {
 
 // handleAIQuery mengirim pertanyaan ke AI dengan konteks obrolan grup.
 func (b *Bot) handleAIQuery(ctx *eventContext) {
+	cleanText := ctx.cleanText
+	if cleanText == "" && ctx.imageData != nil {
+		cleanText = "Deskripsikan gambar ini secara detail atau jawab sesuai konteks jika ini adalah bagian dari percakapan."
+	}
+
 	prompt := fmt.Sprintf(
 		"%s\n\nPesan dari %s:\n%s",
 		b.memory.GetContext(ctx.chatJID),
 		ctx.senderName,
-		ctx.cleanText,
+		cleanText,
 	)
 
-	reply, err := b.ai.Ask(prompt)
+	var reply string
+	var err error
+
+	if ctx.imageData != nil {
+		log.Printf("[VISION] Menganalisis gambar dari %s", ctx.senderName)
+		reply, err = b.ai.AnalyzeImage(prompt, ctx.imageData, ctx.mimeType)
+	} else {
+		reply, err = b.ai.Ask(prompt)
+	}
+
 	if err != nil {
 		log.Printf("Error AI: %v", err)
 		reply = "Waduh, otak AI-ku lagi error nih. 😵"
@@ -212,18 +267,79 @@ func (b *Bot) sendReply(v *events.Message, text string) {
 	}
 }
 
+// sendToGroup mengirim pesan ke grup berdasarkan JID string.
+// Dipakai oleh TriviaService via callback.
+func (b *Bot) sendToGroup(groupJID, text string) {
+	jid, err := types.ParseJID(groupJID)
+	if err != nil {
+		log.Printf("Gagal parse JID %s: %v", groupJID, err)
+		return
+	}
+	if _, err := b.client.SendMessage(context.Background(), jid, &waProto.Message{
+		Conversation: proto.String(text),
+	}); err != nil {
+		log.Printf("Gagal kirim pesan ke %s: %v", groupJID, err)
+	}
+}
+
+// sendPollToGroup mengirim polling asli ke grup.
+func (b *Bot) sendPollToGroup(groupJID, question string, options []string) (string, error) {
+	jid, err := types.ParseJID(groupJID)
+	if err != nil {
+		return "", err
+	}
+
+	// BuildPollCreation membuat message polling (selectable count 1 = satu jawaban)
+	pollMsg := b.client.BuildPollCreation(question, options, 1)
+
+	resp, err := b.client.SendMessage(context.Background(), jid, pollMsg)
+	if err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
+// handlePollUpdate menangani update polling (saat member memilih).
+func (b *Bot) handlePollUpdate(v *events.Message) {
+	if b.trivia == nil {
+		return
+	}
+
+	// Dekripsi isi voting polling
+	vote, err := b.client.DecryptPollVote(context.Background(), v)
+	if err != nil {
+		log.Printf("Gagal dekripsi vote polling: %v", err)
+		return
+	}
+
+	chatJID := v.Info.Chat.String()
+	senderName := senderNameFrom(v)
+
+	// Ambil ID pesan polling asli yang di-update
+	pollMsgID := v.Message.GetPollUpdateMessage().GetPollCreationMessageKey().GetID()
+
+	// Kirim data voting ke TriviaService untuk dicocokkan
+	b.trivia.RecordAnswer(chatJID, pollMsgID, senderName, vote.GetSelectedOptions())
+}
+
 // isMentioningMe memeriksa apakah pesan menyebut bot.
 // Menggunakan Phone JID dan LID karena WhatsApp menggunakan
 // format berbeda tergantung versi dan addressing mode.
 func (b *Bot) isMentioningMe(v *events.Message) bool {
 	identifiers := b.myIdentifiers()
 
-	extMsg := v.Message.GetExtendedTextMessage()
-	if extMsg == nil || extMsg.GetContextInfo() == nil {
+	var contextInfo *waProto.ContextInfo
+	if extMsg := v.Message.GetExtendedTextMessage(); extMsg != nil {
+		contextInfo = extMsg.GetContextInfo()
+	} else if imgMsg := v.Message.GetImageMessage(); imgMsg != nil {
+		contextInfo = imgMsg.GetContextInfo()
+	}
+
+	if contextInfo == nil {
 		return false
 	}
 
-	for _, mentioned := range extMsg.GetContextInfo().GetMentionedJID() {
+	for _, mentioned := range contextInfo.GetMentionedJID() {
 		for _, myID := range identifiers {
 			if strings.Contains(mentioned, myID) {
 				return true
@@ -260,7 +376,13 @@ func rawTextFrom(v *events.Message) string {
 	if text := v.Message.GetConversation(); text != "" {
 		return text
 	}
-	return v.Message.GetExtendedTextMessage().GetText()
+	if ext := v.Message.GetExtendedTextMessage(); ext != nil {
+		return ext.GetText()
+	}
+	if img := v.Message.GetImageMessage(); img != nil {
+		return img.GetCaption()
+	}
+	return ""
 }
 
 // senderNameFrom mendapatkan nama pengirim yang human-readable.
