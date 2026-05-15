@@ -160,16 +160,52 @@ func (t *TriviaService) RecordAnswer(groupJID, pollMsgID, senderName string, sel
 // Internal
 // ==========================================================================
 
+// maxRetries adalah jumlah percobaan ulang saat generateQuestion gagal.
+// Gemini API bisa gagal sementara (rate limit, timeout, JSON invalid),
+// jadi retry dengan backoff mencegah hilangnya satu ronde trivia.
+const maxRetries = 3
+
 func (t *TriviaService) sendTriviaToAllGroups() {
-	question, err := t.generateQuestion()
-	if err != nil {
-		log.Printf("[TRIVIA] Gagal generate pertanyaan: %v", err)
+	// Guard: jangan kirim soal baru jika masih ada kuis aktif yang belum selesai.
+	// Tanpa guard ini, soal baru akan menimpa kuis lama (timer di-Stop),
+	// sehingga jawaban dan hasil kuis lama tidak pernah terkirim.
+	t.mu.Lock()
+	hasActive := len(t.active) > 0
+	t.mu.Unlock()
+	if hasActive {
+		log.Printf("[TRIVIA] Masih ada kuis aktif yang belum selesai, skip ronde ini")
 		return
 	}
+
+	log.Printf("[TRIVIA] Ticker fired — generating new question...")
+
+	question, err := t.generateQuestionWithRetry()
+	if err != nil {
+		log.Printf("[TRIVIA] ❌ Gagal generate pertanyaan setelah %d percobaan: %v", maxRetries, err)
+		return
+	}
+
+	log.Printf("[TRIVIA] ✅ Pertanyaan berhasil: %s", question.Question)
 
 	for _, groupJID := range t.groups {
 		t.startQuiz(groupJID, question)
 	}
+}
+
+// generateQuestionWithRetry mencoba generate pertanyaan hingga maxRetries kali.
+// Backoff eksponensial (2s, 4s, 6s) memberikan jeda agar rate limit mereda.
+func (t *TriviaService) generateQuestionWithRetry() (*triviaQuestion, error) {
+	var lastErr error
+	for attempt := range maxRetries {
+		q, err := t.generateQuestion()
+		if err == nil {
+			return q, nil
+		}
+		lastErr = err
+		log.Printf("[TRIVIA] Generate gagal (attempt %d/%d): %v", attempt+1, maxRetries, err)
+		time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
+	}
+	return nil, lastErr
 }
 
 func (t *TriviaService) generateQuestion() (*triviaQuestion, error) {
@@ -243,9 +279,12 @@ func (t *TriviaService) startQuiz(groupJID string, q *triviaQuestion) {
 	}
 
 	t.mu.Lock()
+	// Jika masih ada kuis aktif (seharusnya tidak terjadi berkat guard di
+	// sendTriviaToAllGroups, tapi defensive), reveal dulu sebelum replace.
 	if old, ok := t.active[groupJID]; ok {
 		old.timer.Stop()
 		delete(t.active, groupJID)
+		log.Printf("[TRIVIA] ⚠️ Kuis lama di %s ditimpa — seharusnya tidak terjadi", groupJID)
 	}
 
 	var hashes [4]string

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -13,10 +14,16 @@ import (
 // Semua detail SDK (client creation, config, tools, response parsing)
 // disembunyikan di sini. Caller hanya perlu tahu satu method: Ask().
 // Jika di masa depan kita ganti provider AI, hanya file ini yang berubah.
+// defaultTimeout adalah batas waktu maksimum untuk setiap API call ke Gemini.
+// 30 detik cukup untuk generasi teks biasa; mencegah goroutine hang selamanya
+// saat Gemini API lambat atau rate-limited.
+const defaultTimeout = 60 * time.Second
+
 type AIService struct {
-	client *genai.Client
-	model  string
-	config *genai.GenerateContentConfig
+	client  *genai.Client
+	model   string
+	config  *genai.GenerateContentConfig
+	timeout time.Duration
 }
 
 // NewAIService membuat AIService baru yang siap pakai.
@@ -41,9 +48,10 @@ func NewAIService(apiKey, model, systemPrompt string) (*AIService, error) {
 	}
 
 	return &AIService{
-		client: client,
-		model:  model,
-		config: config,
+		client:  client,
+		model:   model,
+		config:  config,
+		timeout: defaultTimeout,
 	}, nil
 }
 
@@ -53,6 +61,9 @@ func NewAIService(apiKey, model, systemPrompt string) (*AIService, error) {
 // atau error handling internal. Jika tidak ada respons, kembalikan pesan fallback
 // daripada error kosong — ini mengikuti prinsip "define errors out of existence".
 func (ai *AIService) Ask(prompt string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), ai.timeout)
+	defer cancel()
+
 	contents := []*genai.Content{
 		{
 			Role:  "user",
@@ -61,7 +72,7 @@ func (ai *AIService) Ask(prompt string) (string, error) {
 	}
 
 	resp, err := ai.client.Models.GenerateContent(
-		context.Background(),
+		ctx,
 		ai.model,
 		contents,
 		ai.config,
@@ -76,6 +87,9 @@ func (ai *AIService) Ask(prompt string) (string, error) {
 // AnalyzeImage mengirim prompt dan data gambar ke Gemini.
 // Berguna untuk fitur Vision: "ini foto apa?", OCR, atau estimasi kalori.
 func (ai *AIService) AnalyzeImage(prompt string, imageData []byte, mimeType string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), ai.timeout)
+	defer cancel()
+
 	contents := []*genai.Content{
 		{
 			Role: "user",
@@ -92,7 +106,7 @@ func (ai *AIService) AnalyzeImage(prompt string, imageData []byte, mimeType stri
 	}
 
 	resp, err := ai.client.Models.GenerateContent(
-		context.Background(),
+		ctx,
 		ai.model,
 		contents,
 		ai.config,
