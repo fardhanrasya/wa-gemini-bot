@@ -9,7 +9,7 @@ name: Build & Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 jobs:
@@ -30,7 +30,7 @@ jobs:
             cd ~/wa-gemini-bot
 
             echo "==> Pulling latest code..."
-            git pull origin main
+            git pull origin master
 
             echo "==> Building..."
             go build -o bot ./cmd/bot/
