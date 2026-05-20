@@ -10,6 +10,7 @@ import (
 	"wa-gemini-bot/internal/config"
 	"wa-gemini-bot/internal/memory"
 	"wa-gemini-bot/internal/payment"
+	"wa-gemini-bot/internal/poker"
 	"wa-gemini-bot/internal/trivia"
 
 	"github.com/mattn/go-sqlite3"
@@ -38,6 +39,7 @@ type Bot struct {
 	config *config.Config
 	doku   *payment.DokuService   // nil jika fitur donasi tidak aktif
 	trivia *trivia.TriviaService // nil jika fitur trivia tidak aktif
+	poker  *poker.PokerService   // nil jika fitur poker tidak aktif
 }
 
 // eventContext mengumpulkan data yang sudah di-parse dari satu pesan masuk.
@@ -55,7 +57,7 @@ type eventContext struct {
 // NewBot membuat Bot baru yang siap di-Start().
 // Constructor ini "deep" — menyembunyikan semua setup database, device store,
 // dan event wiring. Caller hanya perlu pass dependency, lalu Start().
-func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku *payment.DokuService, trivia *trivia.TriviaService) (*Bot, error) {
+func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku *payment.DokuService, trivia *trivia.TriviaService, poker *poker.PokerService) (*Bot, error) {
 	ctx := context.Background()
 
 	dbLog := waLog.Stdout("Database", "WARN", true)
@@ -79,6 +81,7 @@ func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku 
 		config: cfg,
 		doku:   doku,
 		trivia: trivia,
+		poker:  poker,
 	}
 
 	client.AddEventHandler(bot.handleEvent)
@@ -91,6 +94,11 @@ func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku 
 	// Daftarkan callback trivia — siklus "Trivia → Bot → WhatsApp"
 	if trivia != nil {
 		trivia.SetCallbacks(bot.sendToGroup, bot.sendPollToGroup, mem.Record)
+	}
+
+	// Daftarkan callback poker — siklus "Poker → Bot → WhatsApp"
+	if poker != nil {
+		poker.SetCallbacks(bot.sendToGroup, bot.sendDM, mem.Record)
 	}
 
 	return bot, nil
@@ -166,6 +174,16 @@ func (b *Bot) handleMessage(v *events.Message) {
 		log.Printf("[REKAM] %s: %s", senderName, rawText)
 	}
 
+	// Poker game actions (fold/call/raise/check/bet/allin) — intercept SEBELUM
+	// mention check karena aksi ini tidak perlu mention bot.
+	// Hanya dicek jika ada game poker aktif di grup ini.
+	if b.poker != nil && b.poker.IsActive(chatJID) {
+		rawAction := strings.TrimSpace(rawText)
+		if b.poker.HandleGameAction(chatJID, senderName, rawAction) {
+			return
+		}
+	}
+
 	if !b.isMentioningMe(v) {
 		return
 	}
@@ -212,7 +230,11 @@ func (b *Bot) handleMessage(v *events.Message) {
 		mimeType:   mimeType,
 	}
 
-	// Dispatch ke handler yang sesuai
+	// Dispatch ke handler yang sesuai — poker mention commands diperiksa dulu
+	if b.handlePokerMention(ctx) {
+		return
+	}
+
 	if b.doku != nil && b.handleDonation(ctx, cleanText) {
 		return
 	}

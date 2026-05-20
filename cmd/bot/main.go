@@ -11,13 +11,14 @@ import (
 	"wa-gemini-bot/internal/config"
 	"wa-gemini-bot/internal/memory"
 	"wa-gemini-bot/internal/payment"
+	"wa-gemini-bot/internal/poker"
 	"wa-gemini-bot/internal/trivia"
 )
 
 // main hanyalah "wiring" — menyambungkan modul-modul yang berdiri sendiri.
 // Tidak ada business logic di sini, hanya urutan inisialisasi.
 //
-// Alur: Config → AI → Memory → [DOKU] → Bot → Start → Wait → Stop
+// Alur: Config → AI → Memory → [DOKU] → [Trivia] → [Poker] → Bot → Start → Wait → Stop
 //
 // Setiap modul menerima dependency-nya via constructor (dependency injection).
 // Ini membuat main.go menjadi satu-satunya tempat yang tahu tentang semua modul,
@@ -60,7 +61,24 @@ func main() {
 		log.Println("Trivia tidak aktif — set TRIVIA_ENABLED=true untuk mengaktifkan")
 	}
 
-	b, err := bot.NewBot(cfg, ai, mem, doku, triv)
+	// Poker — opsional, aktif hanya jika POKER_ENABLED=true
+	var pok *poker.PokerService
+	if cfg.PokerEnabled {
+		pok = poker.NewPokerService(
+			cfg.PokerStartingChips,
+			cfg.PokerSmallBlind,
+			cfg.PokerBigBlind,
+			cfg.PokerTurnTimeoutSec,
+			cfg.PokerAutoNextRoundSec,
+		)
+		log.Printf("Poker ready (chips: %d, blind: %d/%d, timeout: %ds, auto-next: %ds)",
+			cfg.PokerStartingChips, cfg.PokerSmallBlind, cfg.PokerBigBlind,
+			cfg.PokerTurnTimeoutSec, cfg.PokerAutoNextRoundSec)
+	} else {
+		log.Println("Poker tidak aktif — set POKER_ENABLED=true untuk mengaktifkan")
+	}
+
+	b, err := bot.NewBot(cfg, ai, mem, doku, triv, pok)
 	if err != nil {
 		log.Fatalf("Bot error: %v", err)
 	}
@@ -81,4 +99,4 @@ func main() {
 
 	b.Stop()
 	log.Println("Bot dihentikan.")
-}
+}

@@ -34,6 +34,14 @@ type Config struct {
 	TriviaEnabled          bool
 	TriviaIntervalMinutes  int
 	TriviaAnswerTimeoutSec int
+
+	// Poker Game
+	PokerEnabled          bool
+	PokerStartingChips    int // default 1000
+	PokerSmallBlind       int // default 10
+	PokerBigBlind         int // default 20
+	PokerTurnTimeoutSec   int // default 60
+	PokerAutoNextRoundSec int // default 5
 }
 
 // LoadConfig membaca konfigurasi dari .env dan environment variables.
@@ -113,6 +121,39 @@ func LoadConfig() (*Config, error) {
 		}
 	}
 
+	// Poker Config — opsional. Default: nonaktif.
+	pokerEnabled := os.Getenv("POKER_ENABLED") == "true" || os.Getenv("POKER_ENABLED") == "1"
+	pokerStartingChips := 1000
+	if v := os.Getenv("POKER_STARTING_CHIPS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			pokerStartingChips = n
+		}
+	}
+	pokerSmallBlind := 10
+	if v := os.Getenv("POKER_SMALL_BLIND"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			pokerSmallBlind = n
+		}
+	}
+	pokerBigBlind := 20
+	if v := os.Getenv("POKER_BIG_BLIND"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			pokerBigBlind = n
+		}
+	}
+	pokerTurnTimeout := 60
+	if v := os.Getenv("POKER_TURN_TIMEOUT_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			pokerTurnTimeout = n
+		}
+	}
+	pokerAutoNextRound := 5
+	if v := os.Getenv("POKER_AUTO_NEXT_ROUND_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			pokerAutoNextRound = n
+		}
+	}
+
 	return &Config{
 		GeminiAPIKey:     apiKey,
 		GeminiModel:      model,
@@ -130,6 +171,13 @@ func LoadConfig() (*Config, error) {
 		TriviaEnabled:          triviaEnabled,
 		TriviaIntervalMinutes:  triviaInterval,
 		TriviaAnswerTimeoutSec: triviaTimeout,
+
+		PokerEnabled:          pokerEnabled,
+		PokerStartingChips:    pokerStartingChips,
+		PokerSmallBlind:       pokerSmallBlind,
+		PokerBigBlind:         pokerBigBlind,
+		PokerTurnTimeoutSec:   pokerTurnTimeout,
+		PokerAutoNextRoundSec: pokerAutoNextRound,
 	}, nil
 }
 
