@@ -64,7 +64,7 @@ func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku 
 	ctx := context.Background()
 
 	dbLog := waLog.Stdout("Database", "WARN", true)
-	container, err := sqlstore.New(ctx, "sqlite3", "file:wa-session.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(ctx, "sqlite3", "file:data/wa-session.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		return nil, fmt.Errorf("gagal setup database sesi: %w", err)
 	}

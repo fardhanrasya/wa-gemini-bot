@@ -1,0 +1,56 @@
+version: "3.8"
+
+services:
+  wa-gemini-bot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: wa-gemini-bot
+    restart: always
+
+    # Mount .env file dan data directory
+    volumes:
+      - ../.env:/app/.env:ro
+      - ../data:/app/data
+
+    # Port untuk DOKU webhook (jika digunakan)
+    ports:
+      - "8080:8080"
+
+    # Environment variables
+    environment:
+      - TZ=Asia/Jakarta
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "wa-gemini-bot"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
+
+    # Network
+    networks:
+      - wa-bot-network
+
+networks:
+  wa-bot-network:
+    driver: bridge

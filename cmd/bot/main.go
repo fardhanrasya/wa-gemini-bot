@@ -80,7 +80,7 @@ func main() {
 	}
 
 	// Economy — selalu aktif sebagai base layer
-	eco, err := economy.NewEconomyService("wa-economy.db")
+	eco, err := economy.NewEconomyService("data/wa-economy.db")
 	if err != nil {
 		log.Fatalf("Economy service error: %v", err)
 	}
@@ -107,4 +107,4 @@ func main() {
 
 	b.Stop()
 	log.Println("Bot dihentikan.")
-}
+}

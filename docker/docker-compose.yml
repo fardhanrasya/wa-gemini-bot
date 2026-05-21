@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  wa-gemini-bot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: wa-gemini-bot
+    restart: unless-stopped
+
+    # Mount .env file dan data directory
+    volumes:
+      - ../.env:/app/.env:ro
+      - ../data:/app/data
+
+    # Port untuk DOKU webhook (jika digunakan)
+    ports:
+      - "8080:8080"
+
+    # Environment variables (bisa di-override dari .env)
+    environment:
+      - TZ=Asia/Jakarta
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
