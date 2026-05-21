@@ -52,6 +52,8 @@ type pokerSession struct {
 	creatorName  string      // Siapa yang memulai lobby
 	roundNumber  int         // Nomor ronde saat ini
 	startTime    time.Time   // Kapan game dimulai
+	paused       bool        // true jika game sedang di-pause
+	pausedBy     string      // Siapa yang pause
 }
 
 // NewPokerService membuat PokerService baru.
@@ -90,8 +92,8 @@ func (s *PokerService) IsActive(groupJID string) bool {
 // ==========================================================================
 
 // pokerCommandRegex mencocokkan perintah poker saat di-mention.
-// Contoh: "poker", "ikut", "mulai", "stop", "status"
-var pokerCommandRegex = regexp.MustCompile(`(?i)^(poker|ikut|mulai|stop|status)$`)
+// Contoh: "poker", "ikut", "mulai", "stop", "status", "pause", "lanjut"
+var pokerCommandRegex = regexp.MustCompile(`(?i)^(poker|ikut|mulai|stop|status|pause|lanjut|resume)$`)
 
 // actionRegex mencocokkan aksi poker (tanpa mention).
 // Contoh: "fold", "check", "call", "raise 100", "bet 50", "allin"
@@ -116,6 +118,10 @@ func (s *PokerService) HandleMentionCommand(groupJID, senderName, senderJID, tex
 		s.handleStop(groupJID, senderName)
 	case "status":
 		s.handleStatus(groupJID)
+	case "pause":
+		s.handlePause(groupJID, senderName)
+	case "lanjut", "resume":
+		s.handleResume(groupJID, senderName)
 	default:
 		return false
 	}
@@ -141,6 +147,13 @@ func (s *PokerService) HandleGameAction(groupJID, senderName, text string) bool 
 	if session.game.Phase == PhaseLobby || session.game.Phase == PhaseFinished {
 		s.mu.Unlock()
 		return false
+	}
+
+	// Block aksi saat game di-pause
+	if session.paused {
+		s.mu.Unlock()
+		s.sendGroup(groupJID, "⏸️ Game sedang di-pause. Ketik @Abdul lanjut untuk melanjutkan.")
+		return true
 	}
 
 	// Parse aksi
@@ -305,6 +318,71 @@ func (s *PokerService) handleStop(groupJID, senderName string) {
 	s.recordMem(groupJID, "Abdul (Bot)", "[Poker dihentikan oleh "+senderName+"]")
 }
 
+func (s *PokerService) handlePause(groupJID, senderName string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session, ok := s.sessions[groupJID]
+	if !ok {
+		s.sendGroup(groupJID, "❌ Tidak ada game poker yang berjalan.")
+		return
+	}
+	if session.paused {
+		s.sendGroup(groupJID, "⏸️ Game sudah di-pause.")
+		return
+	}
+
+	session.paused = true
+	session.pausedBy = senderName
+
+	// Stop semua timer aktif — tidak ada timeout saat pause
+	if session.turnTimer != nil {
+		session.turnTimer.Stop()
+	}
+	if session.roundTimer != nil {
+		session.roundTimer.Stop()
+	}
+	if session.lobbyTimer != nil {
+		session.lobbyTimer.Stop()
+	}
+
+	s.sendGroup(groupJID, fmt.Sprintf("⏸️ Game di-pause oleh %s.\nKetik @Abdul lanjut untuk melanjutkan.", senderName))
+}
+
+func (s *PokerService) handleResume(groupJID, senderName string) {
+	s.mu.Lock()
+
+	session, ok := s.sessions[groupJID]
+	if !ok {
+		s.mu.Unlock()
+		s.sendGroup(groupJID, "❌ Tidak ada game poker yang berjalan.")
+		return
+	}
+	if !session.paused {
+		s.mu.Unlock()
+		s.sendGroup(groupJID, "▶️ Game tidak sedang di-pause.")
+		return
+	}
+
+	session.paused = false
+	session.pausedBy = ""
+
+	// Restart turn timer jika game sedang berjalan (bukan lobby)
+	if session.game.Phase != PhaseLobby && session.game.Phase != PhaseFinished {
+		s.startTurnTimer(groupJID, session)
+		currentPlayer := session.game.GetCurrentTurnPlayer()
+		s.mu.Unlock()
+
+		s.sendGroup(groupJID, fmt.Sprintf("▶️ Game dilanjutkan oleh %s!", senderName))
+		if currentPlayer != "" {
+			s.sendTurnPrompt(groupJID, currentPlayer)
+		}
+	} else {
+		s.mu.Unlock()
+		s.sendGroup(groupJID, fmt.Sprintf("▶️ Game dilanjutkan oleh %s!", senderName))
+	}
+}
+
 func (s *PokerService) handleStatus(groupJID string) {
 	s.mu.Lock()
 	session, ok := s.sessions[groupJID]
@@ -321,6 +399,9 @@ func (s *PokerService) handleStatus(groupJID string) {
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🃏 *POKER STATUS* — Ronde #%d\n", session.roundNumber))
+	if session.paused {
+		sb.WriteString("⏸️ *PAUSED*\n")
+	}
 	sb.WriteString(fmt.Sprintf("📍 Fase: %s\n", phase))
 	sb.WriteString(fmt.Sprintf("💰 Pot: %s\n", formatChips(pot)))
 	if currentTurn != "" {
