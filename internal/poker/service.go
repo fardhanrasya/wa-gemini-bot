@@ -908,10 +908,21 @@ func (s *PokerService) handleLobbyTimeout(groupJID string) {
 		s.sendGroup(groupJID, fmt.Sprintf("⏰ Waktu lobby habis! Game dimulai dengan %d pemain!", session.game.PlayerCount()))
 		s.startNewRound(groupJID)
 	} else {
+		// Refund chip karena game batal
+		refunds := session.game.RefundAll()
+		if s.onAddBalance != nil {
+			for name, amount := range refunds {
+				jid := session.game.GetPlayerJID(name)
+				if jid != "" {
+					_ = s.onAddBalance(jid, amount)
+				}
+			}
+		}
+
 		s.cleanupSession(session)
 		delete(s.sessions, groupJID)
 		s.mu.Unlock()
-		s.sendGroup(groupJID, "⏰ Waktu lobby habis — kurang pemain. Game dibatalkan.")
+		s.sendGroup(groupJID, "⏰ Waktu lobby habis — kurang pemain. Game dibatalkan dan seluruh chip dikembalikan.")
 	}
 }
 
