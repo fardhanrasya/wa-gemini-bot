@@ -829,7 +829,15 @@ func (g *Game) RefundAll() map[string]int {
 // Jika game sedang berjalan, pemain otomatis fold.
 // Mengembalikan sisa chip (p.Chips), flag found, dan opsi ActionResult jika ada perubahan state.
 func (g *Game) Leave(playerName string) (int, bool, *ActionResult) {
-	p := g.getPlayer(playerName)
+	var p *Player
+	var pIndex int
+	for i, player := range g.Players {
+		if player.Name == playerName {
+			p = player
+			pIndex = i
+			break
+		}
+	}
 	if p == nil {
 		return 0, false, nil
 	}
@@ -845,6 +853,13 @@ func (g *Game) Leave(playerName string) (int, bool, *ActionResult) {
 	}
 
 	p.Status = StatusEliminated
+	
+	// Jika masih di Lobby, hapus player dari slice agar PlayerCount() akurat
+	// dan slot pemain kosong kembali.
+	if g.Phase == PhaseLobby {
+		g.Players = append(g.Players[:pIndex], g.Players[pIndex+1:]...)
+	}
+
 	return remaining, true, res
 }
 

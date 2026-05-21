@@ -205,11 +205,8 @@ func (s *PokerService) HandleGameAction(groupJID, senderName, text string) bool 
 		return true
 	}
 
-	// Kirim pesan aksi
-	s.sendGroup(groupJID, result.Message)
-
-	// Handle hasil aksi
-	s.processActionResult(groupJID, result)
+	// Handle hasil aksi (message akan digabung dan dikirim di sini)
+	s.processActionResult(groupJID, result, nil)
 	return true
 }
 
@@ -403,10 +400,7 @@ func (s *PokerService) handleLeave(groupJID, senderName string) {
 
 	// Lanjutkan ke player berikutnya jika game masih berjalan dan giliran berubah
 	if result != nil {
-		if result.Valid && result.Message != "" {
-			s.sendGroup(groupJID, result.Message)
-		}
-		s.processActionResult(groupJID, *result)
+		s.processActionResult(groupJID, *result, nil)
 	}
 }
 
@@ -467,7 +461,12 @@ func (s *PokerService) handleResume(groupJID, senderName string) {
 
 		s.sendGroup(groupJID, fmt.Sprintf("▶️ Game dilanjutkan oleh %s!", senderName))
 		if currentPlayer != "" {
-			s.sendTurnPrompt(groupJID, currentPlayer)
+			prompt, mentions := s.buildTurnPrompt(groupJID, currentPlayer)
+			if len(mentions) > 0 {
+				s.sendGroupMention(groupJID, prompt, mentions)
+			} else {
+				s.sendGroup(groupJID, prompt)
+			}
 		}
 	} else {
 		s.mu.Unlock()
@@ -537,10 +536,21 @@ func (s *PokerService) startNewRound(groupJID string) {
 	session.roundNumber++
 	info, err := session.game.StartRound()
 	if err != nil {
+		// Refund chip sebagai fallback jika start round gagal
+		refunds := session.game.RefundAll()
+		if s.onAddBalance != nil {
+			for name, amount := range refunds {
+				jid := session.game.GetPlayerJID(name)
+				if jid != "" {
+					_ = s.onAddBalance(jid, amount)
+				}
+			}
+		}
+
 		s.cleanupSession(session)
 		delete(s.sessions, groupJID)
 		s.mu.Unlock()
-		s.sendGroup(groupJID, "❌ Gagal memulai ronde: "+err.Error())
+		s.sendGroup(groupJID, "❌ Gagal memulai ronde: "+err.Error()+" (Seluruh chip dikembalikan)")
 		return
 	}
 	s.mu.Unlock()
@@ -571,7 +581,12 @@ func (s *PokerService) startNewRound(groupJID string) {
 	}
 
 	// Kirim prompt giliran pertama
-	s.sendTurnPrompt(groupJID, info.FirstTurnName)
+	prompt, mentions := s.buildTurnPrompt(groupJID, info.FirstTurnName)
+	if len(mentions) > 0 {
+		s.sendGroupMention(groupJID, prompt, mentions)
+	} else {
+		s.sendGroup(groupJID, prompt)
+	}
 
 	// Start turn timer
 	s.mu.Lock()
@@ -581,12 +596,12 @@ func (s *PokerService) startNewRound(groupJID string) {
 	s.mu.Unlock()
 }
 
-func (s *PokerService) sendTurnPrompt(groupJID, playerName string) {
+func (s *PokerService) buildTurnPrompt(groupJID, playerName string) (string, []string) {
 	s.mu.Lock()
 	session, ok := s.sessions[groupJID]
 	if !ok {
 		s.mu.Unlock()
-		return
+		return "", nil
 	}
 
 	game := session.game
@@ -598,7 +613,7 @@ func (s *PokerService) sendTurnPrompt(groupJID, playerName string) {
 	s.mu.Unlock()
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("\n🎯 Giliran: @%s\n", playerName))
+	sb.WriteString(fmt.Sprintf("🎯 Giliran: @%s\n", playerName))
 	sb.WriteString(fmt.Sprintf("💰 Pot: %s | Taruhan saat ini: %d\n\n", formatChips(pot), currentBet))
 
 	// Build daftar pilihan berdasarkan kondisi
@@ -622,26 +637,38 @@ func (s *PokerService) sendTurnPrompt(groupJID, playerName string) {
 
 	sb.WriteString(fmt.Sprintf("\n⏰ %d detik...", s.turnTimeoutSec))
 
-	// Kirim dengan proper mention jika JID tersedia
+	var mentions []string
 	if playerJID != "" {
-		s.sendGroupMention(groupJID, sb.String(), []string{playerJID})
-	} else {
-		s.sendGroup(groupJID, sb.String())
+		mentions = append(mentions, playerJID)
 	}
+
+	return sb.String(), mentions
 }
 
-func (s *PokerService) processActionResult(groupJID string, result ActionResult) {
+func (s *PokerService) processActionResult(groupJID string, result ActionResult, prefixMentions []string) {
+	var finalMsg strings.Builder
+	
+	if result.Message != "" {
+		finalMsg.WriteString(result.Message)
+		finalMsg.WriteString("\n\n")
+	}
+
 	if result.RoundOver {
-		s.handleRoundOver(groupJID, result)
+		s.handleRoundOver(groupJID, result, &finalMsg, prefixMentions)
 		return
 	}
 
 	if result.PhaseEnded {
-		s.sendPhaseMessage(groupJID, result)
+		finalMsg.WriteString(s.buildPhaseMessage(groupJID, result))
+		finalMsg.WriteString("\n\n")
 	}
 
 	if result.NextPlayer != "" {
-		s.sendTurnPrompt(groupJID, result.NextPlayer)
+		prompt, mentions := s.buildTurnPrompt(groupJID, result.NextPlayer)
+		finalMsg.WriteString(prompt)
+		prefixMentions = append(prefixMentions, mentions...)
+		
+		s.sendGroupMention(groupJID, strings.TrimSpace(finalMsg.String()), prefixMentions)
 
 		// Start turn timer
 		s.mu.Lock()
@@ -649,10 +676,18 @@ func (s *PokerService) processActionResult(groupJID string, result ActionResult)
 			s.startTurnTimer(groupJID, sess)
 		}
 		s.mu.Unlock()
+	} else {
+		if finalMsg.Len() > 0 {
+			if len(prefixMentions) > 0 {
+				s.sendGroupMention(groupJID, strings.TrimSpace(finalMsg.String()), prefixMentions)
+			} else {
+				s.sendGroup(groupJID, strings.TrimSpace(finalMsg.String()))
+			}
+		}
 	}
 }
 
-func (s *PokerService) sendPhaseMessage(groupJID string, result ActionResult) {
+func (s *PokerService) buildPhaseMessage(groupJID string, result ActionResult) string {
 	var sb strings.Builder
 
 	switch result.NewPhase {
@@ -683,10 +718,10 @@ func (s *PokerService) sendPhaseMessage(groupJID string, result ActionResult) {
 	sb.WriteString(fmt.Sprintf("\n\n💰 Pot: %s\n", formatChips(pot)))
 	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	s.sendGroup(groupJID, sb.String())
+	return sb.String()
 }
 
-func (s *PokerService) handleRoundOver(groupJID string, result ActionResult) {
+func (s *PokerService) handleRoundOver(groupJID string, result ActionResult, finalMsg *strings.Builder, mentions []string) {
 	// Cancel turn timer
 	s.mu.Lock()
 	session, ok := s.sessions[groupJID]
@@ -697,7 +732,8 @@ func (s *PokerService) handleRoundOver(groupJID string, result ActionResult) {
 
 	// Showdown results
 	if len(result.ShowdownResults) > 0 {
-		s.sendShowdownMessage(groupJID, result)
+		finalMsg.WriteString(s.buildShowdownMessage(result))
+		finalMsg.WriteString("\n")
 	}
 
 	// Chip standings
@@ -711,8 +747,7 @@ func (s *PokerService) handleRoundOver(groupJID string, result ActionResult) {
 	standings := session.game.GetChipStandings()
 	s.mu.Unlock()
 
-	var sb strings.Builder
-	sb.WriteString("\n📊 Sisa Chip:\n")
+	finalMsg.WriteString("\n📊 Sisa Chip:\n")
 	for i, st := range standings {
 		changeStr := ""
 		if st.Change > 0 {
@@ -724,13 +759,16 @@ func (s *PokerService) handleRoundOver(groupJID string, result ActionResult) {
 		if st.Status == StatusEliminated {
 			status = " ☠️"
 		}
-		sb.WriteString(fmt.Sprintf("  %d. %s: %s 💰%s%s\n", i+1, st.Name, formatChips(st.Chips), changeStr, status))
+		finalMsg.WriteString(fmt.Sprintf("  %d. %s: %s 💰%s%s\n", i+1, st.Name, formatChips(st.Chips), changeStr, status))
 	}
-
-	s.sendGroup(groupJID, sb.String())
 
 	// Game over?
 	if result.GameOver {
+		if len(mentions) > 0 {
+			s.sendGroupMention(groupJID, strings.TrimSpace(finalMsg.String()), mentions)
+		} else {
+			s.sendGroup(groupJID, strings.TrimSpace(finalMsg.String()))
+		}
 		s.handleGameOver(groupJID, result, session)
 		return
 	}
@@ -741,15 +779,21 @@ func (s *PokerService) handleRoundOver(groupJID string, result ActionResult) {
 	if ok {
 		session.game.PrepareNextRound()
 		delay := time.Duration(s.autoNextRoundSec) * time.Second
-		s.sendGroup(groupJID, fmt.Sprintf("\n🔄 Ronde berikutnya dalam %d detik...\n   Ketik @Abdul stop untuk berhenti.", s.autoNextRoundSec))
+		finalMsg.WriteString(fmt.Sprintf("\n\n🔄 Ronde berikutnya dalam %d detik...\n   Ketik @Abdul stop untuk berhenti.", s.autoNextRoundSec))
 		session.roundTimer = time.AfterFunc(delay, func() {
 			s.startNewRound(groupJID)
 		})
 	}
 	s.mu.Unlock()
+
+	if len(mentions) > 0 {
+		s.sendGroupMention(groupJID, strings.TrimSpace(finalMsg.String()), mentions)
+	} else {
+		s.sendGroup(groupJID, strings.TrimSpace(finalMsg.String()))
+	}
 }
 
-func (s *PokerService) sendShowdownMessage(groupJID string, result ActionResult) {
+func (s *PokerService) buildShowdownMessage(result ActionResult) string {
 	var sb strings.Builder
 
 	// Tampilkan community cards dulu
@@ -808,7 +852,7 @@ func (s *PokerService) sendShowdownMessage(groupJID string, result ActionResult)
 	}
 	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	s.sendGroup(groupJID, sb.String())
+	return sb.String()
 }
 
 func (s *PokerService) handleGameOver(groupJID string, result ActionResult, session *pokerSession) {
@@ -876,16 +920,15 @@ func (s *PokerService) handleTurnTimeout(groupJID string) {
 	playerJID := session.game.GetPlayerJID(currentPlayer)
 	s.mu.Unlock()
 
-	// Mention player yang kena timeout
-	msg := fmt.Sprintf("⏰ Waktu habis! @%s otomatis fold. 🏳️", currentPlayer)
+	// Override result.Message dengan message timeout
+	result.Message = fmt.Sprintf("⏰ Waktu habis! @%s otomatis fold. 🏳️", currentPlayer)
+	var mentions []string
 	if playerJID != "" {
-		s.sendGroupMention(groupJID, msg, []string{playerJID})
-	} else {
-		s.sendGroup(groupJID, msg)
+		mentions = append(mentions, playerJID)
 	}
 
 	if result.Valid {
-		s.processActionResult(groupJID, result)
+		s.processActionResult(groupJID, result, mentions)
 	}
 }
 
