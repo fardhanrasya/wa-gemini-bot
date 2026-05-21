@@ -777,8 +777,30 @@ func (s *PokerService) sendShowdownMessage(groupJID string, result ActionResult)
 	}
 
 	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	
+	// Accumulate winnings for players who won multiple pots (e.g., main pot and side pots)
+	type accumulatedWin struct {
+		Amount   int
+		HandDesc string
+	}
+	accWinners := make(map[string]*accumulatedWin)
+	var orderedNames []string // To preserve the order of winners
+	
 	for _, w := range result.Winners {
-		sb.WriteString(fmt.Sprintf("🏆 *PEMENANG: %s*\n", w.PlayerName))
+		if acc, exists := accWinners[w.PlayerName]; exists {
+			acc.Amount += w.Amount
+		} else {
+			accWinners[w.PlayerName] = &accumulatedWin{
+				Amount:   w.Amount,
+				HandDesc: w.HandDesc,
+			}
+			orderedNames = append(orderedNames, w.PlayerName)
+		}
+	}
+
+	for _, name := range orderedNames {
+		w := accWinners[name]
+		sb.WriteString(fmt.Sprintf("🏆 *PEMENANG: %s*\n", name))
 		sb.WriteString(fmt.Sprintf("💰 Menang: %s chip\n", formatChips(w.Amount)))
 		if w.HandDesc != "" {
 			sb.WriteString(fmt.Sprintf("✋ %s\n", w.HandDesc))

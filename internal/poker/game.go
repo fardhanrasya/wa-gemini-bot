@@ -712,30 +712,47 @@ func (g *Game) distributePots(showdownResults []ShowdownPlayerResult) []WinResul
 		}
 
 		// Cari hand terbaik di antara eligible players
-		var bestResult *ShowdownPlayerResult
+		var bestResults []*ShowdownPlayerResult
 		for i := range showdownResults {
 			for _, eligible := range pot.EligiblePlayers {
 				if showdownResults[i].Name == eligible {
-					if bestResult == nil || CompareHands(showdownResults[i].BestHand, bestResult.BestHand) > 0 {
-						bestResult = &showdownResults[i]
+					if len(bestResults) == 0 {
+						bestResults = append(bestResults, &showdownResults[i])
+					} else {
+						cmp := CompareHands(showdownResults[i].BestHand, bestResults[0].BestHand)
+						if cmp > 0 {
+							bestResults = []*ShowdownPlayerResult{&showdownResults[i]}
+						} else if cmp == 0 {
+							bestResults = append(bestResults, &showdownResults[i])
+						}
 					}
 				}
 			}
 		}
 
-		if bestResult != nil {
-			// Berikan chip ke pemenang
-			for _, p := range g.Players {
-				if p.Name == bestResult.Name {
-					p.Chips += pot.Amount
-					break
+		if len(bestResults) > 0 {
+			splitAmount := pot.Amount / len(bestResults)
+			remainder := pot.Amount % len(bestResults)
+
+			for i, bestResult := range bestResults {
+				amountToGive := splitAmount
+				if i == 0 {
+					amountToGive += remainder // Sisa chip ganjil diberikan ke pemenang pertama
 				}
+
+				// Berikan chip ke pemenang
+				for _, p := range g.Players {
+					if p.Name == bestResult.Name {
+						p.Chips += amountToGive
+						break
+					}
+				}
+				winners = append(winners, WinResult{
+					PlayerName: bestResult.Name,
+					Amount:     amountToGive,
+					HandDesc:   bestResult.BestHand.Description,
+				})
 			}
-			winners = append(winners, WinResult{
-				PlayerName: bestResult.Name,
-				Amount:     pot.Amount,
-				HandDesc:   bestResult.BestHand.Description,
-			})
 		}
 	}
 

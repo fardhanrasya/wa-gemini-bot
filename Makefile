@@ -1,4 +1,4 @@
-.PHONY: help build start stop restart logs status update clean reset-session backup test
+.PHONY: help build start stop restart logs status update clean reset-session backup test prod-start prod-stop prod-logs prod-restart prod-update
 
 # Default target
 help:
@@ -24,6 +24,8 @@ help:
 	@echo "  make prod-start         Start with production config"
 	@echo "  make prod-stop          Stop production"
 	@echo "  make prod-logs          Show production logs"
+	@echo "  make prod-restart       Restart production"
+	@echo "  make prod-update        Update production (git pull + rebuild + restart)"
 
 # Setup
 setup:
@@ -124,6 +126,18 @@ prod-restart:
 	@echo "Restarting bot (production mode)..."
 	docker-compose -f docker/docker-compose.prod.yml restart
 	@echo " Bot restarted"
+
+prod-update:
+	@echo "Updating bot (production mode)..."
+	@echo "1. Pulling latest code..."
+	git pull
+	@echo "2. Stopping bot..."
+	docker-compose -f docker/docker-compose.prod.yml down
+	@echo "3. Rebuilding image..."
+	docker-compose -f docker/docker-compose.prod.yml build --no-cache
+	@echo "4. Starting bot..."
+	docker-compose -f docker/docker-compose.prod.yml up -d
+	@echo " Production update complete"
 
 # Backup
 backup:
