@@ -41,20 +41,22 @@ type PokerService struct {
 	onSendGroupWithMentions func(groupJID, text string, mentionJIDs []string)
 	onSendDM                func(userJID, text string)
 	onRecordMemory          func(groupJID, sender, text string)
+	onAddBalance            func(jid string, amount int) error
+	onSubtractBalance       func(jid string, amount int) error
 }
 
 // pokerSession menyimpan state satu sesi poker di satu grup,
 // termasuk game engine dan timer management.
 type pokerSession struct {
-	game         *Game
-	lobbyTimer   *time.Timer // Countdown untuk lobby auto-start
-	turnTimer    *time.Timer // Timeout giliran player
-	roundTimer   *time.Timer // Delay sebelum ronde berikutnya
-	creatorName  string      // Siapa yang memulai lobby
-	roundNumber  int         // Nomor ronde saat ini
-	startTime    time.Time   // Kapan game dimulai
-	paused       bool        // true jika game sedang di-pause
-	pausedBy     string      // Siapa yang pause
+	game        *Game
+	lobbyTimer  *time.Timer // Countdown untuk lobby auto-start
+	turnTimer   *time.Timer // Timeout giliran player
+	roundTimer  *time.Timer // Delay sebelum ronde berikutnya
+	creatorName string      // Siapa yang memulai lobby
+	roundNumber int         // Nomor ronde saat ini
+	startTime   time.Time   // Kapan game dimulai
+	paused      bool        // true jika game sedang di-pause
+	pausedBy    string      // Siapa yang pause
 }
 
 // NewPokerService membuat PokerService baru.
@@ -75,11 +77,15 @@ func (s *PokerService) SetCallbacks(
 	sendGroupWithMentions func(groupJID, text string, mentionJIDs []string),
 	sendDM func(userJID, text string),
 	recordMem func(groupJID, sender, text string),
+	addBalance func(jid string, amount int) error,
+	subtractBalance func(jid string, amount int) error,
 ) {
 	s.onSendGroupMessage = sendGroupMsg
 	s.onSendGroupWithMentions = sendGroupWithMentions
 	s.onSendDM = sendDM
 	s.onRecordMemory = recordMem
+	s.onAddBalance = addBalance
+	s.onSubtractBalance = subtractBalance
 }
 
 // IsActive mengembalikan true jika ada sesi poker aktif di grup ini.
@@ -95,8 +101,8 @@ func (s *PokerService) IsActive(groupJID string) bool {
 // ==========================================================================
 
 // pokerCommandRegex mencocokkan perintah poker saat di-mention.
-// Contoh: "poker", "ikut", "mulai", "stop", "status", "pause", "lanjut"
-var pokerCommandRegex = regexp.MustCompile(`(?i)^(poker|ikut|mulai|stop|status|pause|lanjut|resume)$`)
+// Contoh: "poker", "ikut 1000", "mulai", "stop", "status", "pause", "lanjut", "keluar"
+var pokerCommandRegex = regexp.MustCompile(`(?i)^(poker|ikut(?:\s+\d+)?|mulai|stop|status|pause|lanjut|resume|keluar|leave)$`)
 
 // actionRegex mencocokkan aksi poker (tanpa mention).
 // Contoh: "fold", "check", "call", "raise 100", "bet 50", "allin"
@@ -110,11 +116,23 @@ func (s *PokerService) HandleMentionCommand(groupJID, senderName, senderJID, tex
 		return false
 	}
 
-	switch text {
+	parts := strings.Split(text, " ")
+	cmd := parts[0]
+
+	switch cmd {
 	case "poker":
 		s.handleNewLobby(groupJID, senderName, senderJID)
 	case "ikut":
-		s.handleJoin(groupJID, senderName, senderJID)
+		if len(parts) < 2 {
+			s.sendGroup(groupJID, "❌ Format salah. Gunakan: @Abdul ikut <jumlah_chip> (contoh: @Abdul ikut 1000)")
+			return true
+		}
+		amount, err := strconv.Atoi(parts[1])
+		if err != nil || amount <= 0 {
+			s.sendGroup(groupJID, "❌ Jumlah chip harus angka positif.")
+			return true
+		}
+		s.handleJoin(groupJID, senderName, senderJID, amount)
 	case "mulai":
 		s.handleStartGame(groupJID, senderName)
 	case "stop":
@@ -125,6 +143,8 @@ func (s *PokerService) HandleMentionCommand(groupJID, senderName, senderJID, tex
 		s.handlePause(groupJID, senderName)
 	case "lanjut", "resume":
 		s.handleResume(groupJID, senderName)
+	case "keluar", "leave":
+		s.handleLeave(groupJID, senderName)
 	default:
 		return false
 	}
@@ -207,10 +227,6 @@ func (s *PokerService) handleNewLobby(groupJID, senderName, senderJID string) {
 	}
 
 	game := NewGame(s.smallBlind, s.bigBlind, s.startingChips)
-	if err := game.AddPlayer(senderName, senderJID); err != nil {
-		s.sendGroup(groupJID, "❌ Gagal membuat lobby: "+err.Error())
-		return
-	}
 
 	session := &pokerSession{
 		game:        game,
@@ -225,31 +241,28 @@ func (s *PokerService) handleNewLobby(groupJID, senderName, senderJID string) {
 	s.sessions[groupJID] = session
 
 	msg := fmt.Sprintf(
-		  "\n"+
+		"\n"+
 			"   🃏 TEXAS HOLD'EM POKER 🃏      \n"+
 			"\n"+
 			"                                  \n"+
+			"  Lobby dibuat oleh %s!           \n"+
 			"  Siapa mau main? Ketik:          \n"+
-			"  👉 @Abdul ikut                   \n"+
+			"  👉 @Abdul ikut <jumlah>          \n"+
 			"                                  \n"+
 			"  Min %d pemain, max %d pemain.     \n"+
-			"  Chip awal: %s 💰             \n"+
 			"  Blind: %d/%d                    \n"+
 			"                                  \n"+
 			"  Game dimulai dalam 60 detik     \n"+
-			"  atau ketik: @Abdul mulai        \n"+
-			"                                  \n"+
-			"✅ %s bergabung! (1/%d)",
+			"  atau ketik: @Abdul mulai        \n",
+		senderName,
 		MinPlayers, MaxPlayers,
-		formatChips(s.startingChips),
 		s.smallBlind, s.bigBlind,
-		senderName, MaxPlayers,
 	)
 	s.sendGroup(groupJID, msg)
 	s.recordMem(groupJID, "Abdul (Bot)", "[Poker lobby dibuat oleh "+senderName+"]")
 }
 
-func (s *PokerService) handleJoin(groupJID, senderName, senderJID string) {
+func (s *PokerService) handleJoin(groupJID, senderName, senderJID string, buyin int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -263,12 +276,36 @@ func (s *PokerService) handleJoin(groupJID, senderName, senderJID string) {
 		return
 	}
 
+	// Potong saldo dari DB (gagal jika saldo tak cukup)
+	if s.onSubtractBalance != nil {
+		if err := s.onSubtractBalance(senderJID, buyin); err != nil {
+			s.sendGroup(groupJID, fmt.Sprintf("❌ Gagal join: %v", err))
+			return
+		}
+	} else {
+		// Fallback jika callback belum diset
+		log.Printf("[POKER] Warning: onSubtractBalance nil, using fake chips")
+	}
+
+	// Update game.AddPlayer untuk menerima buyin. Kita harus update game.AddPlayer di game.go!
+	// Sementara kita akan set p.Chips secara manual atau update metode AddPlayer nanti.
 	if err := session.game.AddPlayer(senderName, senderJID); err != nil {
+		// Refund jika gagal join
+		if s.onAddBalance != nil {
+			_ = s.onAddBalance(senderJID, buyin)
+		}
 		s.sendGroup(groupJID, "❌ "+err.Error())
 		return
 	}
 
-	s.sendGroup(groupJID, fmt.Sprintf("✅ %s bergabung! (%d/%d)", senderName, session.game.PlayerCount(), MaxPlayers))
+	// Set chip awal player sejumlah buy-in
+	p := session.game.getPlayer(senderName)
+	if p != nil {
+		p.Chips = buyin
+		p.BuyIn = buyin // Track buy-in amount untuk perhitungan change
+	}
+
+	s.sendGroup(groupJID, fmt.Sprintf("✅ %s bergabung bawa %s chip! (%d/%d)", senderName, formatChips(buyin), session.game.PlayerCount(), MaxPlayers))
 }
 
 func (s *PokerService) handleStartGame(groupJID, senderName string) {
@@ -313,12 +350,64 @@ func (s *PokerService) handleStop(groupJID, senderName string) {
 		return
 	}
 
+	// Refund semua chip yang ada di meja
+	refunds := session.game.RefundAll()
+	if s.onAddBalance != nil {
+		for name, amount := range refunds {
+			jid := session.game.GetPlayerJID(name)
+			if jid != "" {
+				_ = s.onAddBalance(jid, amount)
+			}
+		}
+	}
+
 	// Cleanup timers
 	s.cleanupSession(session)
 	delete(s.sessions, groupJID)
 
-	s.sendGroup(groupJID, fmt.Sprintf("🛑 Game poker dihentikan oleh %s.", senderName))
+	s.sendGroup(groupJID, fmt.Sprintf("🛑 Game poker dihentikan oleh %s. Seluruh chip di meja telah dikembalikan ke saldo masing-masing.", senderName))
 	s.recordMem(groupJID, "Abdul (Bot)", "[Poker dihentikan oleh "+senderName+"]")
+}
+
+func (s *PokerService) handleLeave(groupJID, senderName string) {
+	s.mu.Lock()
+
+	session, ok := s.sessions[groupJID]
+	if !ok {
+		s.mu.Unlock()
+		s.sendGroup(groupJID, "❌ Tidak ada game poker yang berjalan.")
+		return
+	}
+
+	// Proses leave di core game (auto-fold jika perlu, ambil sisa chip)
+	remaining, found, result := session.game.Leave(senderName)
+	if !found {
+		s.mu.Unlock()
+		s.sendGroup(groupJID, "❌ Kamu tidak sedang bermain di meja ini.")
+		return
+	}
+
+	// Cancel turn timer lama
+	if session.turnTimer != nil {
+		session.turnTimer.Stop()
+	}
+	s.mu.Unlock()
+
+	// Refund sisa chip ke DB
+	jid := session.game.GetPlayerJID(senderName)
+	if s.onAddBalance != nil && jid != "" && remaining > 0 {
+		_ = s.onAddBalance(jid, remaining)
+	}
+
+	s.sendGroup(groupJID, fmt.Sprintf("👋 %s keluar dari meja dan membawa pulang %s chip.", senderName, formatChips(remaining)))
+
+	// Lanjutkan ke player berikutnya jika game masih berjalan dan giliran berubah
+	if result != nil {
+		if result.Valid && result.Message != "" {
+			s.sendGroup(groupJID, result.Message)
+		}
+		s.processActionResult(groupJID, *result)
+	}
 }
 
 func (s *PokerService) handlePause(groupJID, senderName string) {
@@ -712,8 +801,19 @@ func (s *PokerService) handleGameOver(groupJID string, result ActionResult, sess
 	s.sendGroup(groupJID, sb.String())
 	s.recordMem(groupJID, "Abdul (Bot)", fmt.Sprintf("[Poker selesai — pemenang: %s, %d ronde]", result.FinalWinner, session.roundNumber))
 
-	// Cleanup session
+	// Refund sisa chip ke DB (biasanya pemenang akhir membawa semua chip)
 	s.mu.Lock()
+	refunds := session.game.RefundAll()
+	if s.onAddBalance != nil {
+		for name, amount := range refunds {
+			jid := session.game.GetPlayerJID(name)
+			if jid != "" {
+				_ = s.onAddBalance(jid, amount)
+			}
+		}
+	}
+
+	// Cleanup session
 	s.cleanupSession(session)
 	delete(s.sessions, groupJID)
 	s.mu.Unlock()

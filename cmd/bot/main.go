@@ -9,6 +9,7 @@ import (
 	"wa-gemini-bot/internal/ai"
 	"wa-gemini-bot/internal/bot"
 	"wa-gemini-bot/internal/config"
+	"wa-gemini-bot/internal/economy"
 	"wa-gemini-bot/internal/memory"
 	"wa-gemini-bot/internal/payment"
 	"wa-gemini-bot/internal/poker"
@@ -54,9 +55,9 @@ func main() {
 	// Trivia — opsional, aktif hanya jika TRIVIA_ENABLED=true
 	var triv *trivia.TriviaService
 	if cfg.TriviaEnabled {
-		triv = trivia.NewTriviaService(ai, cfg.AllowedGroupJIDs, cfg.TriviaIntervalMinutes, cfg.TriviaAnswerTimeoutSec)
-		log.Printf("Trivia ready (interval: %d menit, timeout jawaban: %d detik)",
-			cfg.TriviaIntervalMinutes, cfg.TriviaAnswerTimeoutSec)
+		triv = trivia.NewTriviaService(ai, cfg.AllowedGroupJIDs, cfg.TriviaIntervalMinutes, cfg.TriviaAnswerTimeoutSec, cfg.TriviaReward)
+		log.Printf("Trivia ready (interval: %d menit, timeout jawaban: %d detik, reward: %d chip)",
+			cfg.TriviaIntervalMinutes, cfg.TriviaAnswerTimeoutSec, cfg.TriviaReward)
 	} else {
 		log.Println("Trivia tidak aktif — set TRIVIA_ENABLED=true untuk mengaktifkan")
 	}
@@ -78,7 +79,14 @@ func main() {
 		log.Println("Poker tidak aktif — set POKER_ENABLED=true untuk mengaktifkan")
 	}
 
-	b, err := bot.NewBot(cfg, ai, mem, doku, triv, pok)
+	// Economy — selalu aktif sebagai base layer
+	eco, err := economy.NewEconomyService("wa-economy.db")
+	if err != nil {
+		log.Fatalf("Economy service error: %v", err)
+	}
+	defer eco.Close()
+
+	b, err := bot.NewBot(cfg, ai, mem, doku, triv, pok, eco)
 	if err != nil {
 		log.Fatalf("Bot error: %v", err)
 	}

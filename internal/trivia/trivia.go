@@ -26,6 +26,7 @@ type TriviaService struct {
 	interval time.Duration
 	timeout  time.Duration
 	groups   []string
+	reward   int
 
 	mu     sync.Mutex
 	active map[string]*activeTrivia // groupJID -> kuis aktif
@@ -35,6 +36,7 @@ type TriviaService struct {
 	onSendMention  func(groupJID, text string, mentionJIDs []string)
 	onSendPoll     func(groupJID, question string, options []string) (string, error)
 	onRecordMemory func(groupJID, sender, text string)
+	onAddBalance   func(jid string, amount int) error
 
 	stopChan chan struct{}
 }
@@ -75,12 +77,13 @@ var triviaTopics = []string{
 }
 
 // NewTriviaService membuat TriviaService baru.
-func NewTriviaService(ai *ai.AIService, groups []string, intervalMinutes, timeoutSeconds int) *TriviaService {
+func NewTriviaService(ai *ai.AIService, groups []string, intervalMinutes, timeoutSeconds, reward int) *TriviaService {
 	return &TriviaService{
 		ai:       ai,
 		interval: time.Duration(intervalMinutes) * time.Minute,
 		timeout:  time.Duration(timeoutSeconds) * time.Second,
 		groups:   groups,
+		reward:   reward,
 		active:   make(map[string]*activeTrivia),
 		stopChan: make(chan struct{}),
 	}
@@ -92,11 +95,13 @@ func (t *TriviaService) SetCallbacks(
 	sendMention func(groupJID, text string, mentionJIDs []string),
 	sendPoll func(groupJID, question string, options []string) (string, error),
 	recordMem func(groupJID, sender, text string),
+	addBalance func(jid string, amount int) error,
 ) {
 	t.onSendMessage = sendMsg
 	t.onSendMention = sendMention
 	t.onSendPoll = sendPoll
 	t.onRecordMemory = recordMem
+	t.onAddBalance = addBalance
 }
 
 // Start memulai loop trivia otomatis di background goroutine.
@@ -350,7 +355,10 @@ func (t *TriviaService) revealAnswer(groupJID string) {
 		name := quiz.answerNames[jid]
 		mentionJIDs = append(mentionJIDs, jid)
 		if ansIdx == quiz.correctAnswer {
-			correct = append(correct, fmt.Sprintf("@%s", name))
+			if t.onAddBalance != nil {
+				t.onAddBalance(jid, t.reward)
+			}
+			correct = append(correct, fmt.Sprintf("@%s (+%d 💰)", name, t.reward))
 		} else {
 			wrong = append(wrong, fmt.Sprintf("@%s (pilih: %s)", name, labels[ansIdx]))
 		}

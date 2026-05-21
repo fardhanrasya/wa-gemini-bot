@@ -32,7 +32,7 @@ func (b *Bot) handlePokerMention(ctx *eventContext) bool {
 		return false
 	}
 
-	senderJID := ctx.msg.Info.Sender.String()
+	senderJID := ctx.msg.Info.Sender.ToNonAD().String()
 	return b.poker.HandleMentionCommand(ctx.chatJID, ctx.senderName, senderJID, ctx.cleanText)
 }
 

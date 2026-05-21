@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 
 	"wa-gemini-bot/internal/ai"
 	"wa-gemini-bot/internal/config"
+	"wa-gemini-bot/internal/economy"
 	"wa-gemini-bot/internal/memory"
 	"wa-gemini-bot/internal/payment"
 	"wa-gemini-bot/internal/poker"
@@ -40,6 +42,7 @@ type Bot struct {
 	doku   *payment.DokuService   // nil jika fitur donasi tidak aktif
 	trivia *trivia.TriviaService // nil jika fitur trivia tidak aktif
 	poker  *poker.PokerService   // nil jika fitur poker tidak aktif
+	eco    *economy.EconomyService
 }
 
 // eventContext mengumpulkan data yang sudah di-parse dari satu pesan masuk.
@@ -57,7 +60,7 @@ type eventContext struct {
 // NewBot membuat Bot baru yang siap di-Start().
 // Constructor ini "deep" — menyembunyikan semua setup database, device store,
 // dan event wiring. Caller hanya perlu pass dependency, lalu Start().
-func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku *payment.DokuService, trivia *trivia.TriviaService, poker *poker.PokerService) (*Bot, error) {
+func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku *payment.DokuService, trivia *trivia.TriviaService, poker *poker.PokerService, eco *economy.EconomyService) (*Bot, error) {
 	ctx := context.Background()
 
 	dbLog := waLog.Stdout("Database", "WARN", true)
@@ -82,6 +85,7 @@ func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku 
 		doku:   doku,
 		trivia: trivia,
 		poker:  poker,
+		eco:    eco,
 	}
 
 	client.AddEventHandler(bot.handleEvent)
@@ -93,12 +97,12 @@ func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku 
 
 	// Daftarkan callback trivia — siklus "Trivia → Bot → WhatsApp"
 	if trivia != nil {
-		trivia.SetCallbacks(bot.sendToGroup, bot.sendToGroupWithMentions, bot.sendPollToGroup, mem.Record)
+		trivia.SetCallbacks(bot.sendToGroup, bot.sendToGroupWithMentions, bot.sendPollToGroup, mem.Record, eco.AddBalance)
 	}
 
 	// Daftarkan callback poker — siklus "Poker → Bot → WhatsApp"
 	if poker != nil {
-		poker.SetCallbacks(bot.sendToGroup, bot.sendToGroupWithMentions, bot.sendDM, mem.Record)
+		poker.SetCallbacks(bot.sendToGroup, bot.sendToGroupWithMentions, bot.sendDM, mem.Record, eco.AddBalance, eco.SubtractBalance)
 	}
 
 	return bot, nil
@@ -239,7 +243,122 @@ func (b *Bot) handleMessage(v *events.Message) {
 		return
 	}
 
+	if b.handleEconomy(ctx) {
+		return
+	}
+
 	b.handleAIQuery(ctx)
+}
+
+// handleEconomy menangani command terkait saldo (saldo, transfer).
+func (b *Bot) handleEconomy(ctx *eventContext) bool {
+	if b.eco == nil {
+		return false
+	}
+
+	cleanText := ctx.cleanText
+
+	// Selalu coba update nama jika berinteraksi dengan economy
+	senderJID := ctx.msg.Info.Sender.ToNonAD().String()
+	_ = b.eco.UpdateName(senderJID, ctx.senderName)
+
+	if cleanText == "saldo" || cleanText == "balance" {
+		bal, err := b.eco.GetBalance(senderJID)
+		if err != nil {
+			b.sendToGroup(ctx.chatJID, fmt.Sprintf("❌ Gagal mengecek saldo: %v", err))
+			return true
+		}
+		b.sendToGroup(ctx.chatJID, fmt.Sprintf("💰 Saldo @%s saat ini: %s chip", ctx.senderName, formatNumber(bal)))
+		return true
+	}
+
+	if cleanText == "leaderboard" || cleanText == "top" {
+		users, err := b.eco.GetLeaderboard(10)
+		if err != nil {
+			b.sendToGroup(ctx.chatJID, fmt.Sprintf("❌ Gagal mengambil leaderboard: %v", err))
+			return true
+		}
+
+		var sb strings.Builder
+		sb.WriteString("🏆 *LEADERBOARD SULTAN* 🏆\n━━━━━━━━━━━━━━━━━━━━━━\n")
+		for i, u := range users {
+			name := u.Name
+			if name == "" {
+				name = "Unknown"
+			}
+			sb.WriteString(fmt.Sprintf("%d. %s: 💰 %s\n", i+1, name, formatNumber(u.Balance)))
+		}
+		sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━")
+		b.sendToGroup(ctx.chatJID, sb.String())
+		return true
+	}
+
+	if strings.HasPrefix(cleanText, "transfer ") {
+		parts := strings.Split(cleanText, " ")
+		if len(parts) < 3 {
+			b.sendToGroup(ctx.chatJID, "❌ Format salah. Gunakan: @Abdul transfer @user jumlah")
+			return true
+		}
+
+		// Karena teks sudah di-clean (mention menjadi "@<nomor>"),
+		// target ada di parts[1] (misal "@628...") dan jumlah di parts[2].
+		// Namun yang lebih akurat adalah mengambil MentionedJid dari pesan asli.
+		var targetJID string
+		if extMsg := ctx.msg.Message.GetExtendedTextMessage(); extMsg != nil && extMsg.GetContextInfo() != nil {
+			mentions := extMsg.GetContextInfo().GetMentionedJID()
+			// Hapus bot sendiri dari daftar mention (karena memicu command ini)
+			myIDs := b.myIdentifiers()
+			for _, m := range mentions {
+				isMe := false
+				for _, myID := range myIDs {
+					if strings.Contains(m, myID) {
+						isMe = true
+						break
+					}
+				}
+				if !isMe {
+					targetJID = m
+					break
+				}
+			}
+		}
+
+		if targetJID == "" {
+			b.sendToGroup(ctx.chatJID, "❌ Kamu harus mention pemain yang ingin ditransfer. (@user)")
+			return true
+		}
+
+		amountStr := parts[len(parts)-1]
+		amount, err := strconv.Atoi(amountStr)
+		if err != nil || amount <= 0 {
+			b.sendToGroup(ctx.chatJID, "❌ Jumlah transfer tidak valid.")
+			return true
+		}
+
+		senderJID := ctx.msg.Info.Sender.ToNonAD().String()
+		if err := b.eco.Transfer(senderJID, targetJID, amount); err != nil {
+			b.sendToGroup(ctx.chatJID, fmt.Sprintf("❌ Transfer gagal: %v", err))
+			return true
+		}
+
+		b.sendToGroup(ctx.chatJID, fmt.Sprintf("✅ Berhasil transfer %s chip ke target!", formatNumber(amount)))
+		return true
+	}
+
+	return false
+}
+
+// formatNumber memformat angka dengan pemisah ribuan.
+func formatNumber(n int) string {
+	in := strconv.Itoa(n)
+	var out []rune
+	for i, r := range in {
+		if i > 0 && (len(in)-i)%3 == 0 {
+			out = append(out, '.')
+		}
+		out = append(out, r)
+	}
+	return string(out)
 }
 
 // handleAIQuery mengirim pertanyaan ke AI dengan konteks obrolan grup.
@@ -380,7 +499,7 @@ func (b *Bot) handlePollUpdate(v *events.Message) {
 
 	chatJID := v.Info.Chat.String()
 	senderName := senderNameFrom(v)
-	senderJID := v.Info.Sender.String()
+	senderJID := v.Info.Sender.ToNonAD().String()
 
 	// Ambil ID pesan polling asli yang di-update
 	pollMsgID := v.Message.GetPollUpdateMessage().GetPollCreationMessageKey().GetID()

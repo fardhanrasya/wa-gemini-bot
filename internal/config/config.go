@@ -34,6 +34,7 @@ type Config struct {
 	TriviaEnabled          bool
 	TriviaIntervalMinutes  int
 	TriviaAnswerTimeoutSec int
+	TriviaReward           int
 
 	// Poker Game
 	PokerEnabled          bool
@@ -120,6 +121,12 @@ func LoadConfig() (*Config, error) {
 			triviaTimeout = n
 		}
 	}
+	triviaReward := 500 // default 500 chip
+	if v := os.Getenv("TRIVIA_REWARD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			triviaReward = n
+		}
+	}
 
 	// Poker Config — opsional. Default: nonaktif.
 	pokerEnabled := os.Getenv("POKER_ENABLED") == "true" || os.Getenv("POKER_ENABLED") == "1"
@@ -171,6 +178,7 @@ func LoadConfig() (*Config, error) {
 		TriviaEnabled:          triviaEnabled,
 		TriviaIntervalMinutes:  triviaInterval,
 		TriviaAnswerTimeoutSec: triviaTimeout,
+		TriviaReward:           triviaReward,
 
 		PokerEnabled:          pokerEnabled,
 		PokerStartingChips:    pokerStartingChips,

@@ -23,12 +23,12 @@ type GamePhase int
 
 const (
 	PhaseLobby    GamePhase = iota // Menunggu player join
-	PhasePreFlop                    // Kartu hole dibagikan, ronde taruhan pertama
-	PhaseFlop                       // 3 community cards dibuka
-	PhaseTurn                       // Kartu ke-4 dibuka
-	PhaseRiver                      // Kartu ke-5 dibuka
-	PhaseShowdown                   // Penentuan pemenang
-	PhaseFinished                   // Game selesai (satu pemenang tersisa)
+	PhasePreFlop                   // Kartu hole dibagikan, ronde taruhan pertama
+	PhaseFlop                      // 3 community cards dibuka
+	PhaseTurn                      // Kartu ke-4 dibuka
+	PhaseRiver                     // Kartu ke-5 dibuka
+	PhaseShowdown                  // Penentuan pemenang
+	PhaseFinished                  // Game selesai (satu pemenang tersisa)
 )
 
 var phaseNames = map[GamePhase]string{
@@ -47,19 +47,20 @@ func (p GamePhase) String() string { return phaseNames[p] }
 type PlayerStatus int
 
 const (
-	StatusActive    PlayerStatus = iota // Masih bermain
-	StatusFolded                        // Sudah fold ronde ini
-	StatusAllIn                         // Sudah all-in
-	StatusEliminated                    // Kehabisan chip (keluar dari game)
+	StatusActive     PlayerStatus = iota // Masih bermain
+	StatusFolded                         // Sudah fold ronde ini
+	StatusAllIn                          // Sudah all-in
+	StatusEliminated                     // Kehabisan chip (keluar dari game)
 )
 
 // Player merepresentasikan seorang pemain poker.
 type Player struct {
-	Name      string
-	JID       string // WhatsApp JID untuk DM
-	Chips     int
-	HoleCards [2]Card
-	Status    PlayerStatus
+	Name       string
+	JID        string // WhatsApp JID untuk DM
+	Chips      int
+	BuyIn      int // Jumlah chip yang dibawa saat join (untuk tracking change)
+	HoleCards  [2]Card
+	Status     PlayerStatus
 	CurrentBet int // Taruhan di ronde betting saat ini
 	TotalBet   int // Total taruhan di seluruh ronde (untuk pot calculation)
 }
@@ -68,7 +69,7 @@ type Player struct {
 type ActionType int
 
 const (
-	ActionFold  ActionType = iota
+	ActionFold ActionType = iota
 	ActionCheck
 	ActionCall
 	ActionBet
@@ -85,17 +86,17 @@ type Action struct {
 // ActionResult adalah output dari HandleAction — berisi semua info yang
 // dibutuhkan oleh PokerService untuk mengirim pesan yang tepat.
 type ActionResult struct {
-	Valid       bool
-	Message     string // Pesan untuk dikirim ke grup
-	NextPlayer  string // Nama player berikutnya (kosong jika phase selesai)
-	PhaseEnded  bool   // True jika betting round selesai → advance phase
-	NewPhase    GamePhase
-	CommunityCards []Card // Community cards baru (saat phase advance)
+	Valid           bool
+	Message         string // Pesan untuk dikirim ke grup
+	NextPlayer      string // Nama player berikutnya (kosong jika phase selesai)
+	PhaseEnded      bool   // True jika betting round selesai → advance phase
+	NewPhase        GamePhase
+	CommunityCards  []Card                 // Community cards baru (saat phase advance)
 	ShowdownResults []ShowdownPlayerResult // Hanya diisi saat showdown
-	RoundOver   bool   // True jika ronde selesai (showdown atau semua fold)
-	Winners     []WinResult
-	GameOver    bool   // True jika hanya 1 player tersisa
-	FinalWinner string // Nama pemenang game (hanya saat GameOver)
+	RoundOver       bool                   // True jika ronde selesai (showdown atau semua fold)
+	Winners         []WinResult
+	GameOver        bool   // True jika hanya 1 player tersisa
+	FinalWinner     string // Nama pemenang game (hanya saat GameOver)
 }
 
 // ShowdownPlayerResult berisi hasil evaluasi kartu seorang player saat showdown.
@@ -114,13 +115,13 @@ type WinResult struct {
 
 // Game mengelola seluruh state permainan poker.
 type Game struct {
-	Players        []*Player
-	Phase          GamePhase
-	Deck           *Deck
-	CommunityCards []Card
-	DealerIndex    int // Posisi dealer button
-	SmallBlind     int
-	BigBlind       int
+	Players          []*Player
+	Phase            GamePhase
+	Deck             *Deck
+	CommunityCards   []Card
+	DealerIndex      int // Posisi dealer button
+	SmallBlind       int
+	BigBlind         int
 	CurrentBetAmount int // Taruhan tertinggi saat ini di ronde betting ini
 
 	// Tracking giliran — index ke Players slice
@@ -753,14 +754,20 @@ type ChipStanding struct {
 	Status PlayerStatus
 }
 
-// GetChipStandings mengembalikan standings semua player.
+// GetChipStandings mengembalikan standings semua player yang masih aktif (tidak eliminated).
 func (g *Game) GetChipStandings() []ChipStanding {
 	var standings []ChipStanding
 	for _, p := range g.Players {
+		// Skip player yang sudah eliminated (sudah leave atau bangkrut)
+		if p.Status == StatusEliminated {
+			continue
+		}
+		// Hitung change berdasarkan buy-in aktual, bukan startingChips default
+		change := p.Chips - p.BuyIn
 		standings = append(standings, ChipStanding{
 			Name:   p.Name,
 			Chips:  p.Chips,
-			Change: p.Chips - g.startingChips,
+			Change: change,
 			Status: p.Status,
 		})
 	}
@@ -786,6 +793,43 @@ func (g *Game) PrepareNextRound() {
 // ==========================================================================
 // Internal helpers
 // ==========================================================================
+
+// RefundAll mengembalikan map berisi jumlah chip yang harus dikembalikan ke
+// tiap pemain jika game mendadak berhenti.
+// Perhitungannya: hanya sisa Chips di meja (TotalBet sudah masuk pot dan tidak di-refund).
+func (g *Game) RefundAll() map[string]int {
+	refunds := make(map[string]int)
+	for _, p := range g.Players {
+		// Hanya refund chip yang masih di tangan player, bukan yang sudah di pot
+		if p.Chips > 0 {
+			refunds[p.Name] = p.Chips
+		}
+	}
+	return refunds
+}
+
+// Leave memproses pemain yang keluar dari meja.
+// Jika game sedang berjalan, pemain otomatis fold.
+// Mengembalikan sisa chip (p.Chips), flag found, dan opsi ActionResult jika ada perubahan state.
+func (g *Game) Leave(playerName string) (int, bool, *ActionResult) {
+	p := g.getPlayer(playerName)
+	if p == nil {
+		return 0, false, nil
+	}
+
+	remaining := p.Chips
+	p.Chips = 0
+
+	var res *ActionResult
+	if g.Phase != PhaseLobby && g.Phase != PhaseFinished && p.Status == StatusActive {
+		// Auto-fold jika game sedang jalan
+		r := g.HandleAction(playerName, Action{Type: ActionFold})
+		res = &r
+	}
+
+	p.Status = StatusEliminated
+	return remaining, true, res
+}
 
 // GetPlayerJID mengembalikan JID seorang player berdasarkan nama.
 // Digunakan oleh PokerService untuk proper WhatsApp @-mentions.
