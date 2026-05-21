@@ -32,6 +32,7 @@ type TriviaService struct {
 
 	// Callbacks — diset oleh Bot via SetCallbacks
 	onSendMessage  func(groupJID, text string)
+	onSendMention  func(groupJID, text string, mentionJIDs []string)
 	onSendPoll     func(groupJID, question string, options []string) (string, error)
 	onRecordMemory func(groupJID, sender, text string)
 
@@ -44,8 +45,9 @@ type activeTrivia struct {
 	question      string
 	options       [4]string
 	optionHashes  [4]string         // SHA256 hashes of options
-	correctAnswer int               // Index 0-3 (A=0, B=1, C=2, D=3)
-	answers       map[string]int    // senderName -> selectedIndex
+	correctAnswer int               // index jawaban benar (0-3)
+	answers       map[string]int    // senderJID -> selectedIndex
+	answerNames   map[string]string // senderJID -> senderName
 	timer         *time.Timer
 }
 
@@ -84,13 +86,15 @@ func NewTriviaService(ai *ai.AIService, groups []string, intervalMinutes, timeou
 	}
 }
 
-// SetCallbacks mendaftarkan fungsi callback untuk mengirim pesan dan merekam memori.
+// SetCallbacks mendaftarkan fungsi-fungsi yang dibutuhkan TriviaService
 func (t *TriviaService) SetCallbacks(
 	sendMsg func(groupJID, text string),
+	sendMention func(groupJID, text string, mentionJIDs []string),
 	sendPoll func(groupJID, question string, options []string) (string, error),
 	recordMem func(groupJID, sender, text string),
 ) {
 	t.onSendMessage = sendMsg
+	t.onSendMention = sendMention
 	t.onSendPoll = sendPoll
 	t.onRecordMemory = recordMem
 }
@@ -127,8 +131,8 @@ func (t *TriviaService) IsActive(groupJID string) bool {
 	return ok
 }
 
-// RecordAnswer mencatat jawaban user dari polling berdasarkan hash pilihan.
-func (t *TriviaService) RecordAnswer(groupJID, pollMsgID, senderName string, selectedHashes [][]byte) {
+// RecordAnswer menyimpan jawaban dari polling
+func (t *TriviaService) RecordAnswer(groupJID, pollMsgID, senderName, senderJID string, selectedHashes [][]byte) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -137,21 +141,26 @@ func (t *TriviaService) RecordAnswer(groupJID, pollMsgID, senderName string, sel
 		return
 	}
 
+	// Jika tidak ada yang dipilih (deselect semua)
 	if len(selectedHashes) == 0 {
-		delete(quiz.answers, senderName)
+		delete(quiz.answers, senderJID)
+		delete(quiz.answerNames, senderJID)
 		return
 	}
 
-	// Cocokkan hash yang diterima dengan hash opsi kita
-	// WhatsApp mengirim hash dari pilihan
-	for _, hash := range selectedHashes {
-		hashStr := fmt.Sprintf("%X", hash)
-		for i, h := range quiz.optionHashes {
-			if h == hashStr {
-				quiz.answers[senderName] = i
-				log.Printf("[TRIVIA] %s memilih opsi %d (%s) di grup %s", senderName, i, quiz.options[i], groupJID)
-				return
-			}
+	// Ambil jawaban terakhir (karena WhatsApp poll bisa multiple choice,
+	// kita pakai hash terakhir dari array)
+	lastHashBytes := selectedHashes[len(selectedHashes)-1]
+	lastHashStr := fmt.Sprintf("%X", lastHashBytes)
+
+	// Cocokkan hash dengan opsi
+	for i, hash := range quiz.optionHashes {
+		if hash == lastHashStr {
+			// Simpan berdasarkan senderJID
+			quiz.answers[senderJID] = i
+			quiz.answerNames[senderJID] = senderName
+			log.Printf("[TRIVIA] %s memilih opsi %d (%s) di grup %s", senderName, i, quiz.options[i], groupJID)
+			break
 		}
 	}
 }
@@ -300,6 +309,7 @@ func (t *TriviaService) startQuiz(groupJID string, q *triviaQuestion) {
 		optionHashes:  hashes,
 		correctAnswer: correctIdx,
 		answers:       make(map[string]int),
+		answerNames:   make(map[string]string),
 	}
 	t.active[groupJID] = quiz
 	t.mu.Unlock()
@@ -334,11 +344,15 @@ func (t *TriviaService) revealAnswer(groupJID string) {
 	sb.WriteString(fmt.Sprintf("✅ Jawaban benar: *%s) %s*\n\n", correctLetter, correctText))
 
 	var correct, wrong []string
-	for name, ansIdx := range quiz.answers {
+	var mentionJIDs []string
+	
+	for jid, ansIdx := range quiz.answers {
+		name := quiz.answerNames[jid]
+		mentionJIDs = append(mentionJIDs, jid)
 		if ansIdx == quiz.correctAnswer {
-			correct = append(correct, name)
+			correct = append(correct, fmt.Sprintf("@%s", name))
 		} else {
-			wrong = append(wrong, fmt.Sprintf("%s (pilih: %s)", name, labels[ansIdx]))
+			wrong = append(wrong, fmt.Sprintf("@%s (pilih: %s)", name, labels[ansIdx]))
 		}
 	}
 
@@ -360,7 +374,9 @@ func (t *TriviaService) revealAnswer(groupJID string) {
 		sb.WriteString(fmt.Sprintf("\n📊 Skor: %d/%d benar", len(correct), len(quiz.answers)))
 	}
 
-	if t.onSendMessage != nil {
+	if t.onSendMention != nil {
+		t.onSendMention(groupJID, sb.String(), mentionJIDs)
+	} else if t.onSendMessage != nil {
 		t.onSendMessage(groupJID, sb.String())
 	}
 

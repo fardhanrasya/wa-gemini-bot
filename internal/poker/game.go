@@ -787,6 +787,17 @@ func (g *Game) PrepareNextRound() {
 // Internal helpers
 // ==========================================================================
 
+// GetPlayerJID mengembalikan JID seorang player berdasarkan nama.
+// Digunakan oleh PokerService untuk proper WhatsApp @-mentions.
+func (g *Game) GetPlayerJID(name string) string {
+	for _, p := range g.Players {
+		if p.Name == name {
+			return p.JID
+		}
+	}
+	return ""
+}
+
 func (g *Game) getPlayer(name string) *Player {
 	for _, p := range g.Players {
 		if p.Name == name {

@@ -37,9 +37,10 @@ type PokerService struct {
 	// Callbacks — diset oleh Bot via SetCallbacks.
 	// Sama seperti TriviaService, ini adalah satu-satunya cara
 	// PokerService berkomunikasi ke dunia luar.
-	onSendGroupMessage func(groupJID, text string)
-	onSendDM           func(userJID, text string)
-	onRecordMemory     func(groupJID, sender, text string)
+	onSendGroupMessage      func(groupJID, text string)
+	onSendGroupWithMentions func(groupJID, text string, mentionJIDs []string)
+	onSendDM                func(userJID, text string)
+	onRecordMemory          func(groupJID, sender, text string)
 }
 
 // pokerSession menyimpan state satu sesi poker di satu grup,
@@ -71,10 +72,12 @@ func NewPokerService(startingChips, smallBlind, bigBlind, turnTimeoutSec, autoNe
 // SetCallbacks mendaftarkan fungsi callback untuk berkomunikasi dengan Bot.
 func (s *PokerService) SetCallbacks(
 	sendGroupMsg func(groupJID, text string),
+	sendGroupWithMentions func(groupJID, text string, mentionJIDs []string),
 	sendDM func(userJID, text string),
 	recordMem func(groupJID, sender, text string),
 ) {
 	s.onSendGroupMessage = sendGroupMsg
+	s.onSendGroupWithMentions = sendGroupWithMentions
 	s.onSendDM = sendDM
 	s.onRecordMemory = recordMem
 }
@@ -502,6 +505,7 @@ func (s *PokerService) sendTurnPrompt(groupJID, playerName string) {
 	playerBet := game.GetPlayerCurrentBet(playerName)
 	playerChips := game.GetPlayerChips(playerName)
 	pot := game.GetPot()
+	playerJID := game.GetPlayerJID(playerName)
 	s.mu.Unlock()
 
 	var sb strings.Builder
@@ -529,7 +533,12 @@ func (s *PokerService) sendTurnPrompt(groupJID, playerName string) {
 
 	sb.WriteString(fmt.Sprintf("\n⏰ %d detik...", s.turnTimeoutSec))
 
-	s.sendGroup(groupJID, sb.String())
+	// Kirim dengan proper mention jika JID tersedia
+	if playerJID != "" {
+		s.sendGroupMention(groupJID, sb.String(), []string{playerJID})
+	} else {
+		s.sendGroup(groupJID, sb.String())
+	}
 }
 
 func (s *PokerService) processActionResult(groupJID string, result ActionResult) {
@@ -742,9 +751,16 @@ func (s *PokerService) handleTurnTimeout(groupJID string) {
 
 	// Auto-fold
 	result := session.game.HandleAction(currentPlayer, Action{Type: ActionFold})
+	playerJID := session.game.GetPlayerJID(currentPlayer)
 	s.mu.Unlock()
 
-	s.sendGroup(groupJID, fmt.Sprintf("⏰ Waktu habis! @%s otomatis fold. 🏳️", currentPlayer))
+	// Mention player yang kena timeout
+	msg := fmt.Sprintf("⏰ Waktu habis! @%s otomatis fold. 🏳️", currentPlayer)
+	if playerJID != "" {
+		s.sendGroupMention(groupJID, msg, []string{playerJID})
+	} else {
+		s.sendGroup(groupJID, msg)
+	}
 
 	if result.Valid {
 		s.processActionResult(groupJID, result)
@@ -832,6 +848,17 @@ func (s *PokerService) cleanupSession(session *pokerSession) {
 func (s *PokerService) sendGroup(groupJID, text string) {
 	if s.onSendGroupMessage != nil {
 		s.onSendGroupMessage(groupJID, text)
+	}
+}
+
+// sendGroupMention mengirim pesan dengan proper WhatsApp @-mention.
+// mentionJIDs berisi JID pemain yang ingin di-mention.
+func (s *PokerService) sendGroupMention(groupJID, text string, mentionJIDs []string) {
+	if s.onSendGroupWithMentions != nil {
+		s.onSendGroupWithMentions(groupJID, text, mentionJIDs)
+	} else {
+		// Fallback ke plain text jika callback belum diset
+		s.sendGroup(groupJID, text)
 	}
 }
 

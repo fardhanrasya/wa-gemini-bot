@@ -93,12 +93,12 @@ func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku 
 
 	// Daftarkan callback trivia — siklus "Trivia → Bot → WhatsApp"
 	if trivia != nil {
-		trivia.SetCallbacks(bot.sendToGroup, bot.sendPollToGroup, mem.Record)
+		trivia.SetCallbacks(bot.sendToGroup, bot.sendToGroupWithMentions, bot.sendPollToGroup, mem.Record)
 	}
 
 	// Daftarkan callback poker — siklus "Poker → Bot → WhatsApp"
 	if poker != nil {
-		poker.SetCallbacks(bot.sendToGroup, bot.sendDM, mem.Record)
+		poker.SetCallbacks(bot.sendToGroup, bot.sendToGroupWithMentions, bot.sendDM, mem.Record)
 	}
 
 	return bot, nil
@@ -304,6 +304,50 @@ func (b *Bot) sendToGroup(groupJID, text string) {
 	}
 }
 
+// sendToGroupWithMentions mengirim pesan ke grup dengan proper @-mention.
+//
+// WhatsApp mentions butuh dua hal:
+//  1. Teks yang mengandung "@<nomor>" (tampilan visual)
+//  2. MentionedJid di ContextInfo (agar notifikasi muncul)
+//
+// mentionJIDs berisi JID lengkap (mungkin ada device part) — kita strip
+// device part-nya sebelum kirim, sama seperti di sendDM.
+func (b *Bot) sendToGroupWithMentions(groupJID, text string, mentionJIDs []string) {
+	if len(mentionJIDs) == 0 {
+		// Fallback ke plain text jika tidak ada mention
+		b.sendToGroup(groupJID, text)
+		return
+	}
+
+	jid, err := types.ParseJID(groupJID)
+	if err != nil {
+		log.Printf("Gagal parse JID %s: %v", groupJID, err)
+		return
+	}
+
+	// Strip device part dari setiap JID
+	cleanJIDs := make([]string, len(mentionJIDs))
+	for i, rawJID := range mentionJIDs {
+		parsed, err := types.ParseJID(rawJID)
+		if err != nil {
+			cleanJIDs[i] = rawJID // fallback ke raw
+		} else {
+			cleanJIDs[i] = types.NewJID(parsed.User, parsed.Server).String()
+		}
+	}
+
+	if _, err := b.client.SendMessage(context.Background(), jid, &waProto.Message{
+		ExtendedTextMessage: &waProto.ExtendedTextMessage{
+			Text: proto.String(text),
+			ContextInfo: &waProto.ContextInfo{
+				MentionedJID: cleanJIDs,
+			},
+		},
+	}); err != nil {
+		log.Printf("Gagal kirim pesan mention ke %s: %v", groupJID, err)
+	}
+}
+
 // sendPollToGroup mengirim polling asli ke grup.
 func (b *Bot) sendPollToGroup(groupJID, question string, options []string) (string, error) {
 	jid, err := types.ParseJID(groupJID)
@@ -336,12 +380,13 @@ func (b *Bot) handlePollUpdate(v *events.Message) {
 
 	chatJID := v.Info.Chat.String()
 	senderName := senderNameFrom(v)
+	senderJID := v.Info.Sender.String()
 
 	// Ambil ID pesan polling asli yang di-update
 	pollMsgID := v.Message.GetPollUpdateMessage().GetPollCreationMessageKey().GetID()
 
 	// Kirim data voting ke TriviaService untuk dicocokkan
-	b.trivia.RecordAnswer(chatJID, pollMsgID, senderName, vote.GetSelectedOptions())
+	b.trivia.RecordAnswer(chatJID, pollMsgID, senderName, senderJID, vote.GetSelectedOptions())
 }
 
 // isMentioningMe memeriksa apakah pesan menyebut bot.
