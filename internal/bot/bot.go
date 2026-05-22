@@ -10,6 +10,7 @@ import (
 	"wa-gemini-bot/internal/ai"
 	"wa-gemini-bot/internal/config"
 	"wa-gemini-bot/internal/economy"
+	"wa-gemini-bot/internal/media"
 	"wa-gemini-bot/internal/memory"
 	"wa-gemini-bot/internal/payment"
 	"wa-gemini-bot/internal/poker"
@@ -43,6 +44,7 @@ type Bot struct {
 	trivia *trivia.TriviaService // nil jika fitur trivia tidak aktif
 	poker  *poker.PokerService   // nil jika fitur poker tidak aktif
 	eco    *economy.EconomyService
+	cld    *media.CloudinaryService // nil jika tidak dikonfigurasi
 }
 
 // eventContext mengumpulkan data yang sudah di-parse dari satu pesan masuk.
@@ -60,7 +62,7 @@ type eventContext struct {
 // NewBot membuat Bot baru yang siap di-Start().
 // Constructor ini "deep" — menyembunyikan semua setup database, device store,
 // dan event wiring. Caller hanya perlu pass dependency, lalu Start().
-func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku *payment.DokuService, trivia *trivia.TriviaService, poker *poker.PokerService, eco *economy.EconomyService) (*Bot, error) {
+func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku *payment.DokuService, trivia *trivia.TriviaService, poker *poker.PokerService, eco *economy.EconomyService, cld *media.CloudinaryService) (*Bot, error) {
 	ctx := context.Background()
 
 	dbLog := waLog.Stdout("Database", "WARN", true)
@@ -86,6 +88,7 @@ func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku 
 		trivia: trivia,
 		poker:  poker,
 		eco:    eco,
+		cld:    cld,
 	}
 
 	client.AddEventHandler(bot.handleEvent)
@@ -243,6 +246,11 @@ func (b *Bot) handleMessage(v *events.Message) {
 		return
 	}
 
+	if b.cld != nil && strings.HasPrefix(strings.ToLower(cleanText), "upscale") {
+		b.handleUpscale(ctx)
+		return
+	}
+
 	if b.handleEconomy(ctx) {
 		return
 	}
@@ -361,6 +369,28 @@ func formatNumber(n int) string {
 	return string(out)
 }
 
+// handleUpscale menangani request untuk upscale gambar menggunakan Cloudinary.
+func (b *Bot) handleUpscale(ctx *eventContext) {
+	if ctx.imageData == nil {
+		b.sendReply(ctx.msg, "❌ Kamu harus mengirim gambar atau me-reply gambar dengan caption '@Abdul upscale' untuk menggunakan fitur ini.")
+		return
+	}
+
+	b.sendReply(ctx.msg, "⏳ Sedang mengupscale gambar, tunggu sebentar ya...")
+
+	upscaledData, err := b.cld.UpscaleImage(context.Background(), ctx.imageData)
+	if err != nil {
+		log.Printf("Error upscale: %v", err)
+		b.sendReply(ctx.msg, "❌ Gagal mengupscale gambar. Mungkin ukurannya terlalu besar atau sedang ada gangguan.")
+		return
+	}
+
+	if err := b.sendImage(ctx.msg, upscaledData, "image/jpeg", "✅ Ini hasil upscalenya!"); err != nil {
+		log.Printf("Gagal mengirim gambar upscale: %v", err)
+		b.sendReply(ctx.msg, "❌ Gagal mengirim gambar balasan.")
+	}
+}
+
 // handleAIQuery mengirim pertanyaan ke AI dengan konteks obrolan grup.
 func (b *Bot) handleAIQuery(ctx *eventContext) {
 	cleanText := ctx.cleanText
@@ -406,6 +436,30 @@ func (b *Bot) sendReply(v *events.Message, text string) {
 	}); err != nil {
 		log.Printf("Gagal kirim pesan: %v", err)
 	}
+}
+
+// sendImage mengirim gambar balasan ke chat yang sama.
+func (b *Bot) sendImage(v *events.Message, imageData []byte, mimeType, caption string) error {
+	resp, err := b.client.Upload(context.Background(), imageData, whatsmeow.MediaImage)
+	if err != nil {
+		return fmt.Errorf("gagal upload media ke whatsapp: %w", err)
+	}
+
+	msg := &waProto.Message{
+		ImageMessage: &waProto.ImageMessage{
+			Caption:       proto.String(caption),
+			Mimetype:      proto.String(mimeType),
+			URL:           proto.String(resp.URL),
+			DirectPath:    proto.String(resp.DirectPath),
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    proto.Uint64(uint64(len(imageData))),
+		},
+	}
+
+	_, err = b.client.SendMessage(context.Background(), v.Info.Chat, msg)
+	return err
 }
 
 // sendToGroup mengirim pesan ke grup berdasarkan JID string.

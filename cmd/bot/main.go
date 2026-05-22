@@ -10,6 +10,7 @@ import (
 	"wa-gemini-bot/internal/bot"
 	"wa-gemini-bot/internal/config"
 	"wa-gemini-bot/internal/economy"
+	"wa-gemini-bot/internal/media"
 	"wa-gemini-bot/internal/memory"
 	"wa-gemini-bot/internal/payment"
 	"wa-gemini-bot/internal/poker"
@@ -86,7 +87,18 @@ func main() {
 	}
 	defer eco.Close()
 
-	b, err := bot.NewBot(cfg, ai, mem, doku, triv, pok, eco)
+	// Cloudinary — opsional, aktif jika CLOUDINARY_URL diset
+	cld, err := media.NewCloudinaryService(cfg.CloudinaryURL)
+	if err != nil {
+		log.Fatalf("Cloudinary service error: %v", err)
+	}
+	if cld != nil {
+		log.Println("Cloudinary ready (Image Upscaling: ON)")
+	} else {
+		log.Println("Cloudinary tidak aktif — set CLOUDINARY_URL untuk mengaktifkan fitur upscale")
+	}
+
+	b, err := bot.NewBot(cfg, ai, mem, doku, triv, pok, eco, cld)
 	if err != nil {
 		log.Fatalf("Bot error: %v", err)
 	}

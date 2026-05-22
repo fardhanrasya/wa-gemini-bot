@@ -43,6 +43,9 @@ type Config struct {
 	PokerBigBlind         int // default 20
 	PokerTurnTimeoutSec   int // default 60
 	PokerAutoNextRoundSec int // default 5
+
+	// Cloudinary
+	CloudinaryURL string
 }
 
 // LoadConfig membaca konfigurasi dari .env dan environment variables.
@@ -161,6 +164,8 @@ func LoadConfig() (*Config, error) {
 		}
 	}
 
+	cloudinaryURL := os.Getenv("CLOUDINARY_URL")
+
 	return &Config{
 		GeminiAPIKey:     apiKey,
 		GeminiModel:      model,
@@ -186,6 +191,8 @@ func LoadConfig() (*Config, error) {
 		PokerBigBlind:         pokerBigBlind,
 		PokerTurnTimeoutSec:   pokerTurnTimeout,
 		PokerAutoNextRoundSec: pokerAutoNextRound,
+
+		CloudinaryURL: cloudinaryURL,
 	}, nil
 }
 
