@@ -97,6 +97,9 @@ func NewEconomyService(dbPath string) (*EconomyService, error) {
 		return nil, fmt.Errorf("gagal membuat index transaction_logs: %w", err)
 	}
 
+	// Migrasi database: tambahkan kolom name_is_custom secara aman jika belum ada
+	_, _ = db.Exec("ALTER TABLE users ADD COLUMN name_is_custom INTEGER DEFAULT 0;")
+
 	return &EconomyService{
 		db: db,
 	}, nil
@@ -108,10 +111,43 @@ func (s *EconomyService) Close() error {
 }
 
 // UpdateName mengupdate nama tampilan pengguna untuk keperluan leaderboard.
+// Hanya mengupdate jika pengguna tidak menggunakan nama kustom.
 func (s *EconomyService) UpdateName(jid, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec("UPDATE users SET name = ? WHERE jid = ?", name, jid)
+
+	var isCustom int
+	err := s.db.QueryRow("SELECT name_is_custom FROM users WHERE jid = ?", jid).Scan(&isCustom)
+	if err == nil && isCustom == 1 {
+		return nil // Jangan overwrite nama kustom dengan display name WA
+	}
+
+	_, err = s.db.Exec("UPDATE users SET name = ? WHERE jid = ?", name, jid)
+	return err
+}
+
+// SetCustomName menyimpan nama kustom pilihan pengguna dan mengunci dari auto-update.
+func (s *EconomyService) SetCustomName(jid, newName string) error {
+	// Pastikan user terdaftar dulu di database.
+	// Kita panggil GetBalance tanpa memegang Lock utama karena GetBalance mengelola lock-nya sendiri.
+	_, err := s.GetBalance(jid)
+	if err != nil {
+		return fmt.Errorf("gagal mendaftarkan user untuk nama kustom: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err = s.db.Exec("UPDATE users SET name = ?, name_is_custom = 1 WHERE jid = ?", newName, jid)
+	return err
+}
+
+// ResetCustomName mengembalikan nama pengguna agar ter-update otomatis mengikuti profil WA.
+func (s *EconomyService) ResetCustomName(jid string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("UPDATE users SET name_is_custom = 0 WHERE jid = ?", jid)
 	return err
 }
 
@@ -135,6 +171,26 @@ func (s *EconomyService) GetLeaderboard(limit int) ([]User, error) {
 		users = append(users, u)
 	}
 	return users, nil
+}
+
+// GetUser mengambil data lengkap profil ekonomi seorang pemain.
+func (s *EconomyService) GetUser(jid string) (User, error) {
+	// Pastikan user terdaftar
+	_, err := s.GetBalance(jid)
+	if err != nil {
+		return User{}, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var u User
+	u.JID = jid
+	err = s.db.QueryRow("SELECT name, balance FROM users WHERE jid = ?", jid).Scan(&u.Name, &u.Balance)
+	if err != nil {
+		return User{}, fmt.Errorf("gagal mengambil profil user: %w", err)
+	}
+	return u, nil
 }
 
 // GetBalance mengembalikan saldo pengguna saat ini.

@@ -270,13 +270,74 @@ func (b *Bot) handleEconomy(ctx *eventContext) bool {
 	senderJID := ctx.msg.Info.Sender.ToNonAD().String()
 	_ = b.eco.UpdateName(senderJID, ctx.senderName)
 
+	if strings.HasPrefix(cleanText, "setname ") || strings.HasPrefix(cleanText, "nickname ") {
+		var nameArg string
+		if strings.HasPrefix(cleanText, "setname ") {
+			nameArg = strings.TrimPrefix(cleanText, "setname ")
+		} else {
+			nameArg = strings.TrimPrefix(cleanText, "nickname ")
+		}
+		newName := strings.TrimSpace(nameArg)
+		if newName == "" {
+			b.sendToGroup(ctx.chatJID, "❌ Format salah. Gunakan: `@bot setname <nama_baru>` atau `@bot setname reset`")
+			return true
+		}
+
+		if strings.ToLower(newName) == "reset" {
+			if err := b.eco.ResetCustomName(senderJID); err != nil {
+				b.sendToGroup(ctx.chatJID, fmt.Sprintf("❌ Gagal mereset nama kustom: %v", err))
+			} else {
+				b.sendToGroup(ctx.chatJID, fmt.Sprintf("✅ Nama kustom di-reset. Nama kamu sekarang otomatis mengikuti profil WA: *%s*", ctx.senderName))
+			}
+			return true
+		}
+
+		// Batasi panjang nama agar tidak merusak tampilan chat/leaderboard (maksimal 20 karakter)
+		if len([]rune(newName)) > 20 {
+			b.sendToGroup(ctx.chatJID, "❌ Nama kustom terlalu panjang. Maksimal 20 karakter.")
+			return true
+		}
+
+		if err := b.eco.SetCustomName(senderJID, newName); err != nil {
+			b.sendToGroup(ctx.chatJID, fmt.Sprintf("❌ Gagal mengubah nama kustom: %v", err))
+		} else {
+			b.sendToGroup(ctx.chatJID, fmt.Sprintf("✅ Nama kustom kamu berhasil diubah menjadi: *%s*", newName))
+		}
+		return true
+	}
+
 	if cleanText == "saldo" || cleanText == "balance" {
-		bal, err := b.eco.GetBalance(senderJID)
+		user, err := b.eco.GetUser(senderJID)
 		if err != nil {
 			b.sendToGroup(ctx.chatJID, fmt.Sprintf("❌ Gagal mengecek saldo: %v", err))
 			return true
 		}
-		b.sendToGroup(ctx.chatJID, fmt.Sprintf("💰 Saldo @%s saat ini: %s chip", ctx.senderName, formatNumber(bal)))
+		displayName := user.Name
+		if displayName == "" {
+			displayName = ctx.senderName
+		}
+		rank := economy.GetRankByBalance(user.Balance)
+		b.sendToGroup(ctx.chatJID, fmt.Sprintf("💰 Saldo *%s* saat ini: *%s* chip [%s]", displayName, formatNumber(user.Balance), rank.Styled))
+		return true
+	}
+
+	if cleanText == "ranks" || cleanText == "pangkat" || cleanText == "leaderboard help" || cleanText == "leaderboard info" {
+		var sb strings.Builder
+		sb.WriteString("🎖️ *DAFTAR PANGKAT* 🎖️\n")
+		sb.WriteString("Kumpulkan chip untuk naik pangkat!\n")
+		sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━\n")
+		for _, r := range economy.Ranks {
+			var limitStr string
+			if r.MinChips == 0 {
+				limitStr = "0 - 4.999 chip"
+			} else {
+				limitStr = fmt.Sprintf(">= %s chip", formatNumber(r.MinChips))
+			}
+			sb.WriteString(fmt.Sprintf("%s (%s)\n_%s_\n\n", r.Styled, limitStr, r.Description))
+		}
+		sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━\n")
+		sb.WriteString("💡 *Tips*: Ketik `@bot setname <nama>` untuk mengganti nickname kustom profil bot kamu!")
+		b.sendToGroup(ctx.chatJID, sb.String())
 		return true
 	}
 
@@ -288,13 +349,14 @@ func (b *Bot) handleEconomy(ctx *eventContext) bool {
 		}
 
 		var sb strings.Builder
-		sb.WriteString("🏆 *LEADERBOARD SULTAN* 🏆\n━━━━━━━━━━━━━━━━━━━━━━\n")
+		sb.WriteString("🏆 *LEADERBOARD* 🏆\n━━━━━━━━━━━━━━━━━━━━━━\n")
 		for i, u := range users {
 			name := u.Name
 			if name == "" {
 				name = "Unknown"
 			}
-			sb.WriteString(fmt.Sprintf("%d. %s: 💰 %s\n", i+1, name, formatNumber(u.Balance)))
+			rank := economy.GetRankByBalance(u.Balance)
+			sb.WriteString(fmt.Sprintf("%d. %s *%s*: 💰 %s chip\n", i+1, rank.Styled, name, formatNumber(u.Balance)))
 		}
 		sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━")
 		b.sendToGroup(ctx.chatJID, sb.String())
