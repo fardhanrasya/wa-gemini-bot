@@ -101,14 +101,14 @@ func (s *PokerService) IsActive(groupJID string) bool {
 // ==========================================================================
 
 // pokerCommandRegex mencocokkan perintah poker saat di-mention.
-// Contoh: "poker", "ikut 1000", "mulai", "stop", "status", "pause", "lanjut", "keluar"
-var pokerCommandRegex = regexp.MustCompile(`(?i)^(poker|ikut(?:\s+\d+)?|mulai|stop|status|pause|lanjut|resume|keluar|leave)$`)
+// Contoh: "poker", "poker help", "poker guide", "ikut 1000", "mulai", "stop", "status", "pause", "lanjut", "resume", "keluar", "leave"
+var pokerCommandRegex = regexp.MustCompile(`(?i)^(poker(?:\s+(?:help|guide))?|ikut(?:\s+\d+)?|mulai|stop|status|pause|lanjut|resume|keluar|leave)$`)
 
 // actionRegex mencocokkan aksi poker (tanpa mention).
 // Contoh: "fold", "check", "call", "raise 100", "bet 50", "allin"
 var actionRegex = regexp.MustCompile(`(?i)^(fold|check|call|raise\s+\d+|bet\s+\d+|allin|all-in|all in)$`)
 
-// HandleMentionCommand memproses perintah poker yang di-mention (e.g., "@Abdul poker").
+// HandleMentionCommand memproses perintah poker yang di-mention (e.g., "@bot poker").
 // Return true jika pesan di-handle sebagai perintah poker.
 func (s *PokerService) HandleMentionCommand(groupJID, senderName, senderJID, text string) bool {
 	text = strings.TrimSpace(strings.ToLower(text))
@@ -116,15 +116,30 @@ func (s *PokerService) HandleMentionCommand(groupJID, senderName, senderJID, tex
 		return false
 	}
 
-	parts := strings.Split(text, " ")
+	// Menggunakan strings.Fields untuk mengabaikan spasi ganda secara otomatis (define errors out of existence).
+	parts := strings.Fields(text)
+	if len(parts) == 0 {
+		return false
+	}
 	cmd := parts[0]
 
 	switch cmd {
 	case "poker":
+		if len(parts) > 1 {
+			subCmd := parts[1]
+			switch subCmd {
+			case "help":
+				s.handlePokerHelp(groupJID)
+				return true
+			case "guide":
+				s.handlePokerGuide(groupJID)
+				return true
+			}
+		}
 		s.handleNewLobby(groupJID, senderName, senderJID)
 	case "ikut":
 		if len(parts) < 2 {
-			s.sendGroup(groupJID, "❌ Format salah. Gunakan: @Abdul ikut <jumlah_chip> (contoh: @Abdul ikut 1000)")
+			s.sendGroup(groupJID, "❌ Format salah. Gunakan: @bot ikut <jumlah_chip> (contoh: @bot ikut 1000)")
 			return true
 		}
 		amount, err := strconv.Atoi(parts[1])
@@ -151,6 +166,76 @@ func (s *PokerService) HandleMentionCommand(groupJID, senderName, senderJID, tex
 	return true
 }
 
+// handlePokerHelp mengirimkan petunjuk penggunaan perintah poker.
+func (s *PokerService) handlePokerHelp(groupJID string) {
+	msg := "🃏 *POKER HELP — PANDUAN PERINTAH BOT* 🃏\n" +
+		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+		"Untuk berinteraksi dengan bot poker, gunakan perintah-perintah berikut dengan melakukan `@mention` pada bot:\n\n" +
+		"*Lobby & Pengaturan Game:*\n" +
+		"👉 `@bot poker`\n" +
+		"   Membuat lobby game poker baru di grup.\n" +
+		"👉 `@bot ikut <jumlah>`\n" +
+		"   Bergabung ke lobby dengan jumlah chip tertentu (misal: `@bot ikut 1000`).\n" +
+		"👉 `@bot mulai`\n" +
+		"   Memulai permainan (minimal 2 pemain).\n" +
+		"👉 `@bot status`\n" +
+		"   Melihat status permainan saat ini, kartu meja, dan sisa chip pemain.\n" +
+		"👉 `@bot stop`\n" +
+		"   Menghentikan permainan secara paksa dan mengembalikan seluruh chip ke saldo.\n" +
+		"👉 `@bot keluar` / `@bot leave`\n" +
+		"   Keluar dari permainan dan menarik sisa chip kembali ke saldo.\n" +
+		"👉 `@bot pause`\n" +
+		"   Menunda permainan sementara (timer giliran dihentikan).\n" +
+		"👉 `@bot lanjut` / `@bot resume`\n" +
+		"   Melanjutkan kembali permainan yang sedang di-pause.\n" +
+		"👉 `@bot poker guide`\n" +
+		"   Melihat panduan lengkap cara bermain Texas Hold'em Poker.\n\n" +
+		"*Aksi di Meja Game (Tanpa Tag Bot):*\n" +
+		"Saat giliranmu, ketik langsung perintah berikut tanpa me-mention bot:\n" +
+		"👉 `fold` — Menyerah dan membuang kartu.\n" +
+		"👉 `check` — Melewati giliran tanpa menambah taruhan (jika tidak ada taruhan).\n" +
+		"👉 `call` — Menyamakan taruhan saat ini.\n" +
+		"👉 `bet <jumlah>` — Memasang taruhan baru (misal: `bet 100`).\n" +
+		"👉 `raise <jumlah>` — Menaikkan nilai taruhan (misal: `raise 200`).\n" +
+		"👉 `allin` — Mempertaruhkan seluruh chip yang tersisa di meja.\n\n" +
+		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+		"Ketik `@bot poker guide` untuk membaca panduan aturan & kombinasi kartu poker!"
+
+	s.sendGroup(groupJID, msg)
+}
+
+// handlePokerGuide mengirimkan panduan cara bermain Texas Hold'em Poker.
+func (s *PokerService) handlePokerGuide(groupJID string) {
+	msg := "🃏 *TEXAS HOLD'EM POKER — CARA BERMAIN* 🃏\n" +
+		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+		"Texas Hold'em adalah permainan kartu di mana tujuanmu adalah memenangkan chip di dalam *pot* dengan membuat kombinasi 5 kartu terbaik atau membuat pemain lain menyerah (*fold*).\n\n" +
+		"*1. Jalannya Permainan (Fase)*\n" +
+		"• *Pre-Flop*: Setiap pemain mendapat 2 kartu rahasia (*hole cards*) via DM. Taruhan blind dipasang secara otomatis oleh Dealer.\n" +
+		"• *Flop*: 3 kartu meja (*community cards*) dibuka untuk semua pemain. Ronde taruhan dimulai.\n" +
+		"• *Turn*: Kartu meja ke-4 dibuka. Ronde taruhan dimulai lagi.\n" +
+		"• *River*: Kartu meja ke-5 (terakhir) dibuka. Ronde taruhan terakhir.\n" +
+		"• *Showdown*: Pemain yang tersisa membuka kartunya, kombinasi 5 kartu terbaik memenangkan seluruh chip di pot!\n\n" +
+		"*2. Urutan Kekuatan Kombinasi Kartu (Terendah → Tertinggi)*\n" +
+		"1. *High Card* 🃏 — Kartu dengan nilai tertinggi jika tidak ada kombinasi.\n" +
+		"2. *One Pair* 👥 — 2 kartu dengan nilai yang sama (contoh: A-A).\n" +
+		"3. *Two Pair* ✌️ — 2 pasang kartu dengan nilai yang sama (contoh: K-K & 10-10).\n" +
+		"4. *Three of a Kind* 🌲 — 3 kartu dengan nilai yang sama (contoh: 8-8-8).\n" +
+		"5. *Straight* 🪜 — 5 kartu berurutan nilainya, beda lambang (contoh: 5-6-7-8-9).\n" +
+		"6. *Flush* 💧 — 5 kartu dengan lambang yang sama, acak nilainya (contoh: semua Sekop/Spade ♠️).\n" +
+		"7. *Full House* 🏠 — Gabungan *Three of a Kind* dan *One Pair* (contoh: Q-Q-Q & 7-7).\n" +
+		"8. *Four of a Kind* 🍀 — 4 kartu dengan nilai yang sama (contoh: J-J-J-J).\n" +
+		"9. *Straight Flush* 🌪️ — 5 kartu berurutan nilainya DAN lambangnya sama (contoh: 4-5-6-7-8 Hati/Heart ♥️).\n" +
+		"10. *Royal Flush* 👑 — 5 kartu berurutan tertinggi dengan lambang sama (10-J-Q-K-A Sekop/Spade ♠️).\n\n" +
+		"*3. Tips & Trik*\n" +
+		"• Jangan takut untuk *fold* jika kartu awalmu buruk.\n" +
+		"• Perhatikan kartu meja dan potensi kombinasi kartu lawan.\n" +
+		"• Kelola chipmu dengan bijak, pasang taruhan lebih besar saat kartumu kuat untuk memaksimalkan pot!\n\n" +
+		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+		"Ayo buat meja sekarang dengan mengetik `@bot poker`!"
+
+	s.sendGroup(groupJID, msg)
+}
+
 // HandleGameAction memproses aksi poker (tanpa mention) saat game aktif.
 // Return true jika pesan di-handle sebagai aksi poker.
 func (s *PokerService) HandleGameAction(groupJID, senderName, text string) bool {
@@ -175,7 +260,7 @@ func (s *PokerService) HandleGameAction(groupJID, senderName, text string) bool 
 	// Block aksi saat game di-pause
 	if session.paused {
 		s.mu.Unlock()
-		s.sendGroup(groupJID, "⏸️ Game sedang di-pause. Ketik @Abdul lanjut untuk melanjutkan.")
+		s.sendGroup(groupJID, "⏸️ Game sedang di-pause. Ketik @bot lanjut untuk melanjutkan.")
 		return true
 	}
 
@@ -244,19 +329,19 @@ func (s *PokerService) handleNewLobby(groupJID, senderName, senderJID string) {
 			"                                  \n"+
 			"  Lobby dibuat oleh %s!           \n"+
 			"  Siapa mau main? Ketik:          \n"+
-			"  👉 @Abdul ikut <jumlah>          \n"+
+			"  👉 @bot ikut <jumlah>          \n"+
 			"                                  \n"+
 			"  Min %d pemain, max %d pemain.     \n"+
 			"  Blind: %d/%d                    \n"+
 			"                                  \n"+
 			"  Game dimulai dalam 60 detik     \n"+
-			"  atau ketik: @Abdul mulai        \n",
+			"  atau ketik: @bot mulai        \n",
 		senderName,
 		MinPlayers, MaxPlayers,
 		s.smallBlind, s.bigBlind,
 	)
 	s.sendGroup(groupJID, msg)
-	s.recordMem(groupJID, "Abdul (Bot)", "[Poker lobby dibuat oleh "+senderName+"]")
+	s.recordMem(groupJID, "bot (Bot)", "[Poker lobby dibuat oleh "+senderName+"]")
 }
 
 func (s *PokerService) handleJoin(groupJID, senderName, senderJID string, buyin int) {
@@ -265,7 +350,7 @@ func (s *PokerService) handleJoin(groupJID, senderName, senderJID string, buyin 
 
 	session, ok := s.sessions[groupJID]
 	if !ok {
-		s.sendGroup(groupJID, "❌ Belum ada lobby poker. Ketik @Abdul poker untuk memulai.")
+		s.sendGroup(groupJID, "❌ Belum ada lobby poker. Ketik @bot poker untuk memulai.")
 		return
 	}
 	if session.game.Phase != PhaseLobby {
@@ -363,7 +448,7 @@ func (s *PokerService) handleStop(groupJID, senderName string) {
 	delete(s.sessions, groupJID)
 
 	s.sendGroup(groupJID, fmt.Sprintf("🛑 Game poker dihentikan oleh %s. Seluruh chip di meja telah dikembalikan ke saldo masing-masing.", senderName))
-	s.recordMem(groupJID, "Abdul (Bot)", "[Poker dihentikan oleh "+senderName+"]")
+	s.recordMem(groupJID, "bot (Bot)", "[Poker dihentikan oleh "+senderName+"]")
 }
 
 func (s *PokerService) handleLeave(groupJID, senderName string) {
@@ -432,7 +517,7 @@ func (s *PokerService) handlePause(groupJID, senderName string) {
 		session.lobbyTimer.Stop()
 	}
 
-	s.sendGroup(groupJID, fmt.Sprintf("⏸️ Game di-pause oleh %s.\nKetik @Abdul lanjut untuk melanjutkan.", senderName))
+	s.sendGroup(groupJID, fmt.Sprintf("⏸️ Game di-pause oleh %s.\nKetik @bot lanjut untuk melanjutkan.", senderName))
 }
 
 func (s *PokerService) handleResume(groupJID, senderName string) {
@@ -779,7 +864,7 @@ func (s *PokerService) handleRoundOver(groupJID string, result ActionResult, fin
 	if ok {
 		session.game.PrepareNextRound()
 		delay := time.Duration(s.autoNextRoundSec) * time.Second
-		finalMsg.WriteString(fmt.Sprintf("\n\n🔄 Ronde berikutnya dalam %d detik...\n   Ketik @Abdul stop untuk berhenti.", s.autoNextRoundSec))
+		finalMsg.WriteString(fmt.Sprintf("\n\n🔄 Ronde berikutnya dalam %d detik...\n   Ketik @bot stop untuk berhenti.", s.autoNextRoundSec))
 		session.roundTimer = time.AfterFunc(delay, func() {
 			s.startNewRound(groupJID)
 		})
@@ -865,7 +950,7 @@ func (s *PokerService) handleGameOver(groupJID string, result ActionResult, sess
 	sb.WriteString(fmt.Sprintf("Bermain %d ronde, total %d menit.\n", session.roundNumber, minutes))
 
 	s.sendGroup(groupJID, sb.String())
-	s.recordMem(groupJID, "Abdul (Bot)", fmt.Sprintf("[Poker selesai — pemenang: %s, %d ronde]", result.FinalWinner, session.roundNumber))
+	s.recordMem(groupJID, "bot (Bot)", fmt.Sprintf("[Poker selesai — pemenang: %s, %d ronde]", result.FinalWinner, session.roundNumber))
 
 	// Refund sisa chip ke DB (biasanya pemenang akhir membawa semua chip)
 	s.mu.Lock()
