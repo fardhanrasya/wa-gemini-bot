@@ -36,7 +36,7 @@ type TriviaService struct {
 	onSendMention  func(groupJID, text string, mentionJIDs []string)
 	onSendPoll     func(groupJID, question string, options []string) (string, error)
 	onRecordMemory func(groupJID, sender, text string)
-	onAddBalance   func(jid string, amount int) error
+	onAddBalance   func(jid string, amount int, txType, reference string) error
 
 	stopChan chan struct{}
 }
@@ -95,7 +95,7 @@ func (t *TriviaService) SetCallbacks(
 	sendMention func(groupJID, text string, mentionJIDs []string),
 	sendPoll func(groupJID, question string, options []string) (string, error),
 	recordMem func(groupJID, sender, text string),
-	addBalance func(jid string, amount int) error,
+	addBalance func(jid string, amount int, txType, reference string) error,
 ) {
 	t.onSendMessage = sendMsg
 	t.onSendMention = sendMention
@@ -356,7 +356,7 @@ func (t *TriviaService) revealAnswer(groupJID string) {
 		mentionJIDs = append(mentionJIDs, jid)
 		if ansIdx == quiz.correctAnswer {
 			if t.onAddBalance != nil {
-				t.onAddBalance(jid, t.reward)
+				t.onAddBalance(jid, t.reward, "trivia_reward", groupJID)
 			}
 			correct = append(correct, fmt.Sprintf("@%s (+%d 💰)", name, t.reward))
 		} else {

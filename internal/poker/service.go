@@ -41,8 +41,8 @@ type PokerService struct {
 	onSendGroupWithMentions func(groupJID, text string, mentionJIDs []string)
 	onSendDM                func(userJID, text string)
 	onRecordMemory          func(groupJID, sender, text string)
-	onAddBalance            func(jid string, amount int) error
-	onSubtractBalance       func(jid string, amount int) error
+	onAddBalance            func(jid string, amount int, txType, reference string) error
+	onSubtractBalance       func(jid string, amount int, txType, reference string) error
 }
 
 // pokerSession menyimpan state satu sesi poker di satu grup,
@@ -77,8 +77,8 @@ func (s *PokerService) SetCallbacks(
 	sendGroupWithMentions func(groupJID, text string, mentionJIDs []string),
 	sendDM func(userJID, text string),
 	recordMem func(groupJID, sender, text string),
-	addBalance func(jid string, amount int) error,
-	subtractBalance func(jid string, amount int) error,
+	addBalance func(jid string, amount int, txType, reference string) error,
+	subtractBalance func(jid string, amount int, txType, reference string) error,
 ) {
 	s.onSendGroupMessage = sendGroupMsg
 	s.onSendGroupWithMentions = sendGroupWithMentions
@@ -360,7 +360,7 @@ func (s *PokerService) handleJoin(groupJID, senderName, senderJID string, buyin 
 
 	// Potong saldo dari DB (gagal jika saldo tak cukup)
 	if s.onSubtractBalance != nil {
-		if err := s.onSubtractBalance(senderJID, buyin); err != nil {
+		if err := s.onSubtractBalance(senderJID, buyin, "poker_buyin", groupJID); err != nil {
 			s.sendGroup(groupJID, fmt.Sprintf("❌ Gagal join: %v", err))
 			return
 		}
@@ -374,7 +374,7 @@ func (s *PokerService) handleJoin(groupJID, senderName, senderJID string, buyin 
 	if err := session.game.AddPlayer(senderName, senderJID); err != nil {
 		// Refund jika gagal join
 		if s.onAddBalance != nil {
-			_ = s.onAddBalance(senderJID, buyin)
+			_ = s.onAddBalance(senderJID, buyin, "poker_refund", groupJID)
 		}
 		s.sendGroup(groupJID, "❌ "+err.Error())
 		return
@@ -438,7 +438,7 @@ func (s *PokerService) handleStop(groupJID, senderName string) {
 		for name, amount := range refunds {
 			jid := session.game.GetPlayerJID(name)
 			if jid != "" {
-				_ = s.onAddBalance(jid, amount)
+				_ = s.onAddBalance(jid, amount, "poker_stop_refund", groupJID)
 			}
 		}
 	}
@@ -461,6 +461,11 @@ func (s *PokerService) handleLeave(groupJID, senderName string) {
 		return
 	}
 
+	// Simpan JID SEBELUM Leave() menghapus player dari slice.
+	// Tanpa ini, GetPlayerJID() akan return "" setelah Leave() di fase lobby
+	// karena player sudah dihapus dari Players slice, dan refund tidak pernah terjadi.
+	jid := session.game.GetPlayerJID(senderName)
+
 	// Proses leave di core game (auto-fold jika perlu, ambil sisa chip)
 	remaining, found, result := session.game.Leave(senderName)
 	if !found {
@@ -474,11 +479,8 @@ func (s *PokerService) handleLeave(groupJID, senderName string) {
 		session.turnTimer.Stop()
 	}
 	s.mu.Unlock()
-
-	// Refund sisa chip ke DB
-	jid := session.game.GetPlayerJID(senderName)
 	if s.onAddBalance != nil && jid != "" && remaining > 0 {
-		_ = s.onAddBalance(jid, remaining)
+		_ = s.onAddBalance(jid, remaining, "poker_leave", groupJID)
 	}
 
 	s.sendGroup(groupJID, fmt.Sprintf("👋 %s keluar dari meja dan membawa pulang %s chip.", senderName, formatChips(remaining)))
@@ -627,7 +629,7 @@ func (s *PokerService) startNewRound(groupJID string) {
 			for name, amount := range refunds {
 				jid := session.game.GetPlayerJID(name)
 				if jid != "" {
-					_ = s.onAddBalance(jid, amount)
+					_ = s.onAddBalance(jid, amount, "poker_round_fail_refund", groupJID)
 				}
 			}
 		}
@@ -959,7 +961,7 @@ func (s *PokerService) handleGameOver(groupJID string, result ActionResult, sess
 		for name, amount := range refunds {
 			jid := session.game.GetPlayerJID(name)
 			if jid != "" {
-				_ = s.onAddBalance(jid, amount)
+				_ = s.onAddBalance(jid, amount, "poker_gameover_refund", groupJID)
 			}
 		}
 	}
@@ -1042,7 +1044,7 @@ func (s *PokerService) handleLobbyTimeout(groupJID string) {
 			for name, amount := range refunds {
 				jid := session.game.GetPlayerJID(name)
 				if jid != "" {
-					_ = s.onAddBalance(jid, amount)
+					_ = s.onAddBalance(jid, amount, "poker_lobby_timeout_refund", groupJID)
 				}
 			}
 		}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -22,6 +23,9 @@ var (
 
 // EconomyService mengelola mata uang/chip pemain secara persisten
 // menggunakan database SQLite.
+//
+// Setiap mutasi saldo dicatat secara atomik di tabel transaction_logs,
+// sehingga ada audit trail lengkap untuk debugging dan recovery.
 type EconomyService struct {
 	db *sql.DB
 	mu sync.RWMutex
@@ -34,23 +38,63 @@ type User struct {
 	Balance int
 }
 
+// TransactionLog merepresentasikan satu record log transaksi.
+type TransactionLog struct {
+	ID           int
+	JID          string
+	Amount       int
+	BalanceAfter int
+	Type         string
+	Reference    string
+	CreatedAt    time.Time
+}
+
 // NewEconomyService membuat atau membuka koneksi ke database SQLite.
+// Schema migration bersifat additive — tabel baru ditambahkan tanpa
+// mengubah tabel yang sudah ada, sehingga data lama aman.
 func NewEconomyService(dbPath string) (*EconomyService, error) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("gagal membuka database economy: %w", err)
 	}
 
-	// Buat tabel jika belum ada
-	query := `
+	// Buat tabel users jika belum ada (schema asli, tidak diubah)
+	usersTable := `
 	CREATE TABLE IF NOT EXISTS users (
 		jid TEXT PRIMARY KEY,
 		name TEXT DEFAULT '',
 		balance INTEGER NOT NULL
 	);
 	`
-	if _, err := db.Exec(query); err != nil {
+	if _, err := db.Exec(usersTable); err != nil {
 		return nil, fmt.Errorf("gagal membuat tabel users: %w", err)
+	}
+
+	// Tabel transaction_logs — audit trail untuk setiap mutasi saldo.
+	// Setiap row merepresentasikan satu perubahan balance:
+	//   - amount: positif = masuk, negatif = keluar
+	//   - balance_after: saldo setelah transaksi (untuk verifikasi konsistensi)
+	//   - type: kategori transaksi (poker_buyin, trivia_reward, transfer_out, dll)
+	//   - reference: konteks tambahan (misal group JID, round number)
+	txLogsTable := `
+	CREATE TABLE IF NOT EXISTS transaction_logs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		jid TEXT NOT NULL,
+		amount INTEGER NOT NULL,
+		balance_after INTEGER NOT NULL,
+		type TEXT NOT NULL,
+		reference TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	`
+	if _, err := db.Exec(txLogsTable); err != nil {
+		return nil, fmt.Errorf("gagal membuat tabel transaction_logs: %w", err)
+	}
+
+	// Index untuk query by JID (riwayat transaksi per user)
+	indexQuery := `CREATE INDEX IF NOT EXISTS idx_tx_logs_jid ON transaction_logs(jid);`
+	if _, err := db.Exec(indexQuery); err != nil {
+		return nil, fmt.Errorf("gagal membuat index transaction_logs: %w", err)
 	}
 
 	return &EconomyService{
@@ -126,16 +170,36 @@ func (s *EconomyService) registerNewUser(jid string) error {
 		return nil // Already exists
 	}
 
-	_, err = s.db.Exec("INSERT INTO users (jid, balance) VALUES (?, ?)", jid, InitialBalance)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("gagal memulai transaksi register: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec("INSERT INTO users (jid, balance) VALUES (?, ?)", jid, InitialBalance)
 	if err != nil {
 		return fmt.Errorf("gagal register user baru: %w", err)
 	}
+
+	// Log transaksi modal awal
+	if err := logTransaction(tx, jid, InitialBalance, InitialBalance, "initial", "new_user_registration"); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("gagal commit register: %w", err)
+	}
+
 	log.Printf("[ECONOMY] User baru %s mendapatkan modal awal %d", jid, InitialBalance)
 	return nil
 }
 
 // AddBalance menambahkan sejumlah saldo ke pengguna.
-func (s *EconomyService) AddBalance(jid string, amount int) error {
+//
+// txType mengidentifikasi sumber penambahan (misal: "poker_refund", "poker_win",
+// "trivia_reward"). reference memberikan konteks tambahan (misal: group JID).
+// Keduanya dicatat di transaction_logs untuk audit trail.
+func (s *EconomyService) AddBalance(jid string, amount int, txType, reference string) error {
 	if amount <= 0 {
 		return nil
 	}
@@ -149,16 +213,41 @@ func (s *EconomyService) AddBalance(jid string, amount int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err = s.db.Exec("UPDATE users SET balance = balance + ? WHERE jid = ?", amount, jid)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("gagal memulai transaksi add: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec("UPDATE users SET balance = balance + ? WHERE jid = ?", amount, jid)
 	if err != nil {
 		return fmt.Errorf("gagal menambah saldo: %w", err)
 	}
+
+	// Baca saldo setelah update untuk dicatat di log
+	var balanceAfter int
+	if err := tx.QueryRow("SELECT balance FROM users WHERE jid = ?", jid).Scan(&balanceAfter); err != nil {
+		return fmt.Errorf("gagal baca saldo setelah add: %w", err)
+	}
+
+	if err := logTransaction(tx, jid, amount, balanceAfter, txType, reference); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("gagal commit add balance: %w", err)
+	}
+
+	log.Printf("[ECONOMY] %s +%d (%s: %s) → saldo: %d", jid, amount, txType, reference, balanceAfter)
 	return nil
 }
 
 // SubtractBalance mengurangi saldo pengguna.
 // Akan mengembalikan ErrInsufficientFunds jika saldo tidak cukup.
-func (s *EconomyService) SubtractBalance(jid string, amount int) error {
+//
+// txType mengidentifikasi alasan pengurangan (misal: "poker_buyin").
+// reference memberikan konteks tambahan.
+func (s *EconomyService) SubtractBalance(jid string, amount int, txType, reference string) error {
 	if amount <= 0 {
 		return ErrInvalidAmount
 	}
@@ -166,9 +255,14 @@ func (s *EconomyService) SubtractBalance(jid string, amount int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Kita bisa gunakan transaksi untuk membaca lalu update, atau
-	// andalkan RDBMS dengan WHERE balance >= amount.
-	res, err := s.db.Exec("UPDATE users SET balance = balance - ? WHERE jid = ? AND balance >= ?", amount, jid, amount)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("gagal memulai transaksi subtract: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Gunakan UPDATE ... WHERE balance >= amount untuk atomik check-and-subtract
+	res, err := tx.Exec("UPDATE users SET balance = balance - ? WHERE jid = ? AND balance >= ?", amount, jid, amount)
 	if err != nil {
 		return fmt.Errorf("gagal mengurangi saldo: %w", err)
 	}
@@ -177,16 +271,17 @@ func (s *EconomyService) SubtractBalance(jid string, amount int) error {
 	if err != nil {
 		return fmt.Errorf("gagal cek hasil update: %w", err)
 	}
-	
+
 	if rows == 0 {
 		// Pastikan user terdaftar, jika terdaftar berarti saldo tak cukup
 		var current int
-		err := s.db.QueryRow("SELECT balance FROM users WHERE jid = ?", jid).Scan(&current)
+		err := tx.QueryRow("SELECT balance FROM users WHERE jid = ?", jid).Scan(&current)
 		if err == sql.ErrNoRows {
-			// Daftarkan dulu
-			s.mu.Unlock() // unlock to allow register
+			// Daftarkan dulu — unlock mutex karena registerNewUser perlu lock
+			tx.Rollback()
+			s.mu.Unlock()
 			_, errReg := s.GetBalance(jid)
-			s.mu.Lock()   // re-lock
+			s.mu.Lock()
 			if errReg != nil {
 				return errReg
 			}
@@ -195,10 +290,26 @@ func (s *EconomyService) SubtractBalance(jid string, amount int) error {
 		return ErrInsufficientFunds
 	}
 
+	// Baca saldo setelah update
+	var balanceAfter int
+	if err := tx.QueryRow("SELECT balance FROM users WHERE jid = ?", jid).Scan(&balanceAfter); err != nil {
+		return fmt.Errorf("gagal baca saldo setelah subtract: %w", err)
+	}
+
+	if err := logTransaction(tx, jid, -amount, balanceAfter, txType, reference); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("gagal commit subtract balance: %w", err)
+	}
+
+	log.Printf("[ECONOMY] %s -%d (%s: %s) → saldo: %d", jid, amount, txType, reference, balanceAfter)
 	return nil
 }
 
 // Transfer memindahkan saldo dari pengirim ke penerima.
+// Kedua sisi transaksi dicatat secara atomik dalam satu database transaction.
 func (s *EconomyService) Transfer(fromJid, toJid string, amount int) error {
 	if fromJid == toJid {
 		return ErrSelfTransfer
@@ -229,11 +340,11 @@ func (s *EconomyService) Transfer(fromJid, toJid string, amount int) error {
 	if err != nil {
 		return fmt.Errorf("gagal memotong saldo pengirim: %w", err)
 	}
-	rows, err := res.RowsAffected()
+	rowsAffected, err := res.RowsAffected()
 	if err != nil {
 		return err
 	}
-	if rows == 0 {
+	if rowsAffected == 0 {
 		return ErrInsufficientFunds
 	}
 
@@ -243,9 +354,68 @@ func (s *EconomyService) Transfer(fromJid, toJid string, amount int) error {
 		return fmt.Errorf("gagal menambah saldo penerima: %w", err)
 	}
 
+	// Baca saldo setelah update untuk kedua pihak
+	var fromBalance, toBalance int
+	if err := tx.QueryRow("SELECT balance FROM users WHERE jid = ?", fromJid).Scan(&fromBalance); err != nil {
+		return fmt.Errorf("gagal baca saldo pengirim: %w", err)
+	}
+	if err := tx.QueryRow("SELECT balance FROM users WHERE jid = ?", toJid).Scan(&toBalance); err != nil {
+		return fmt.Errorf("gagal baca saldo penerima: %w", err)
+	}
+
+	// Log kedua sisi transaksi
+	ref := fmt.Sprintf("transfer_%s_to_%s", fromJid, toJid)
+	if err := logTransaction(tx, fromJid, -amount, fromBalance, "transfer_out", ref); err != nil {
+		return err
+	}
+	if err := logTransaction(tx, toJid, amount, toBalance, "transfer_in", ref); err != nil {
+		return err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("gagal commit transfer: %w", err)
 	}
 
+	log.Printf("[ECONOMY] Transfer %d: %s → %s (saldo: %d → %d)", amount, fromJid, toJid, fromBalance, toBalance)
+	return nil
+}
+
+// GetTransactionHistory mengembalikan riwayat transaksi terakhir untuk seorang user.
+// Berguna untuk debugging dan fitur "riwayat" di masa depan.
+func (s *EconomyService) GetTransactionHistory(jid string, limit int) ([]TransactionLog, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		"SELECT id, jid, amount, balance_after, type, reference, created_at FROM transaction_logs WHERE jid = ? ORDER BY id DESC LIMIT ?",
+		jid, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("gagal mengambil riwayat transaksi: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []TransactionLog
+	for rows.Next() {
+		var l TransactionLog
+		if err := rows.Scan(&l.ID, &l.JID, &l.Amount, &l.BalanceAfter, &l.Type, &l.Reference, &l.CreatedAt); err != nil {
+			return nil, err
+		}
+		logs = append(logs, l)
+	}
+	return logs, nil
+}
+
+// logTransaction mencatat satu mutasi saldo ke tabel transaction_logs.
+// Selalu dipanggil di dalam database transaction yang sama dengan mutasi saldo,
+// sehingga log dan saldo dijamin konsisten (keduanya commit atau rollback bersama).
+func logTransaction(tx *sql.Tx, jid string, amount, balanceAfter int, txType, reference string) error {
+	_, err := tx.Exec(
+		"INSERT INTO transaction_logs (jid, amount, balance_after, type, reference) VALUES (?, ?, ?, ?, ?)",
+		jid, amount, balanceAfter, txType, reference,
+	)
+	if err != nil {
+		return fmt.Errorf("gagal mencatat transaksi: %w", err)
+	}
 	return nil
 }
