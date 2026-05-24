@@ -191,21 +191,23 @@ func (b *Bot) handleMessage(v *events.Message) {
 		log.Printf("[REKAM] %s: %s", senderName, rawText)
 	}
 
-	// Poker game actions (fold/call/raise/check/bet/allin) — intercept SEBELUM
-	// mention check karena aksi ini tidak perlu mention bot.
-	// Hanya dicek jika ada game poker aktif di grup ini.
+	rawAction := strings.TrimSpace(rawText)
+	senderJID := v.Info.Sender.ToNonAD().String()
+
+	// Blackjack bet/leave tanpa mention — sebelum poker agar "bet N" tidak masuk aksi poker.
+	if b.blackjack != nil && b.blackjack.HandleQuickCommand(chatJID, senderName, senderJID, rawAction) {
+		return
+	}
+
+	// Poker game actions (fold/call/raise/check/bet/allin) — tanpa mention.
 	if b.poker != nil && b.poker.IsActive(chatJID) {
-		rawAction := strings.TrimSpace(rawText)
 		if b.poker.HandleGameAction(chatJID, senderName, rawAction) {
 			return
 		}
 	}
 
-	// Blackjack game actions (hit/stand/double) — intercept SEBELUM
-	// mention check karena aksi ini tidak perlu mention bot.
-	// Hanya dicek jika ada game blackjack aktif di grup ini.
+	// Blackjack hit/stand/double — tanpa mention, saat giliran aktif.
 	if b.blackjack != nil && b.blackjack.IsActive(chatJID) {
-		rawAction := strings.TrimSpace(rawText)
 		if b.blackjack.HandleGameAction(chatJID, senderName, rawAction) {
 			return
 		}
@@ -338,10 +340,11 @@ func (b *Bot) handleEconomy(ctx *eventContext) bool {
 		sb.WriteString("* `@bot bj guide` : Tampilkan panduan cara bermain blackjack.\n")
 		sb.WriteString("* `@bot bj help` : Tampilkan semua command dalam blackjack.\n")
 		sb.WriteString("* `@bot bj ikut <saldo>` : Beli/top-up saldo meja blackjack (seperti poker).\n")
-		sb.WriteString("* `@bot bj bet <jumlah>` : Atur jumlah taruhan aktif untuk ronde berikutnya.\n")
+		sb.WriteString("* `@bot bj bet <jumlah>` : Atur taruhan (sama seperti `bet <jumlah>` tanpa tag).\n")
 		sb.WriteString("* `@bot bj mulai` : Memulai permainan blackjack secara manual.\n")
 		sb.WriteString("* `@bot bj status` : Tampilkan status game blackjack aktif.\n")
-		sb.WriteString("* `@bot bj leave` : Keluar dari meja blackjack (sisa saldo meja dikembalikan ke wallet).\n\n")
+		sb.WriteString("* `@bot bj leave` : Keluar meja (sama seperti `leave` tanpa tag).\n")
+		sb.WriteString("* Tanpa tag (saat di meja BJ): `hit` `stand` `double` | jeda ronde: `bet <jumlah>` `leave`\n\n")
 
 		sb.WriteString("🖼️ *UTILITY*\n")
 		sb.WriteString("* `@bot upscale` : Tingkatkan resolusi/kualitas gambar (Gunakan sebagai balasan/reply pada gambar).\n\n")

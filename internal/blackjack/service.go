@@ -104,8 +104,14 @@ func (s *BlackjackService) IsPlayerInGame(groupJID, senderJID string) bool {
 }
 
 
-// actionRegex mencocokkan aksi game blackjack (tanpa mention).
+// actionRegex mencocokkan aksi game blackjack di meja (tanpa mention).
 var actionRegex = regexp.MustCompile(`(?i)^(hit|stand|double)$`)
+
+// quickBetRegex — ubah taruhan sticky (hanya pemain BJ; diproses sebelum poker "bet N").
+var quickBetRegex = regexp.MustCompile(`(?i)^(bet|taruhan)\s+(\d+)$`)
+
+// quickLeaveRegex — keluar meja (hanya pemain BJ).
+var quickLeaveRegex = regexp.MustCompile(`(?i)^(leave|keluar)$`)
 
 // HandleMentionCommand memproses perintah blackjack yang di-mention (e.g., "@bot bj").
 func (s *BlackjackService) HandleMentionCommand(groupJID, senderName, senderJID, text string) bool {
@@ -175,6 +181,33 @@ func (s *BlackjackService) HandleMentionCommand(groupJID, senderName, senderJID,
 	}
 
 	return true
+}
+
+// HandleQuickCommand memproses bet/leave tanpa mention untuk pemain yang sedang di meja BJ.
+// Dipanggil sebelum poker HandleGameAction agar "bet N" tidak tertangkap sebagai aksi poker.
+func (s *BlackjackService) HandleQuickCommand(groupJID, senderName, senderJID, text string) bool {
+	text = strings.TrimSpace(strings.ToLower(text))
+
+	if !s.IsPlayerInGame(groupJID, senderJID) {
+		return false
+	}
+
+	if quickLeaveRegex.MatchString(text) {
+		s.handleLeave(groupJID, senderName, senderJID)
+		return true
+	}
+
+	if m := quickBetRegex.FindStringSubmatch(text); m != nil {
+		amount, err := strconv.Atoi(m[2])
+		if err != nil || amount <= 0 {
+			s.sendGroup(groupJID, "❌ Jumlah taruhan harus berupa angka positif.")
+			return true
+		}
+		s.handleSetBet(groupJID, senderName, senderJID, amount)
+		return true
+	}
+
+	return false
 }
 
 // HandleGameAction memproses aksi blackjack (tanpa mention) saat game aktif.
@@ -416,7 +449,7 @@ func (s *BlackjackService) handleJoin(groupJID, senderName, senderJID string, be
 
 	joinMsg := fmt.Sprintf("✅ *%s* bergabung! %s (%d/%d)", senderName, balanceLine, playerCount, MaxPlayers)
 	if phase == PhaseFinished {
-		joinMsg += fmt.Sprintf("\n⏰ Ronde berikutnya dimulai dalam *%d detik*... Ubah taruhan dengan *@bot bj bet <jumlah>*.", s.autoNextRoundSec)
+		joinMsg += fmt.Sprintf("\n⏰ Ronde berikutnya dimulai dalam *%d detik*... Ubah taruhan: ketik *bet <jumlah>*.", s.autoNextRoundSec)
 	} else {
 		joinMsg += "\nKetik *@bot bj mulai* atau tunggu lobby otomatis."
 	}
@@ -1090,7 +1123,7 @@ func (s *BlackjackService) handleGuide(groupJID string) {
 		"• *Kalah* / *Bust* (>21): Taruhan ditarik bandar.\n\n" +
 		"*4. Taruhan:*\n" +
 		"• Taruhan ronde berikutnya mengikuti ronde sebelumnya (bukan all-in otomatis).\n" +
-		"• Ubah taruhan saat jeda antar ronde: `@bot bj bet <jumlah>`.\n" +
+		"• Ubah taruhan saat jeda antar ronde: ketik `bet <jumlah>` (tanpa tag bot).\n" +
 		"• Jika saldo meja kurang dari taruhan, sistem otomatis all-in (taruhan = seluruh saldo meja).\n\n" +
 		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
 		"Mulai meja game baru sekarang dengan mengetik *@bot bj*!"
@@ -1104,17 +1137,18 @@ func (s *BlackjackService) handleHelp(groupJID string) {
 		"*Mengelola Game (Pake Tag/Mention):*\n" +
 		"👉 `@bot bj` — Membuat lobby game blackjack baru.\n" +
 		"👉 `@bot bj ikut <saldo>` — Beli/top-up saldo meja blackjack (contoh: `@bot bj ikut 5000`).\n" +
-		"👉 `@bot bj bet <jumlah>` — Ubah taruhan antar ronde saat jeda cooldown (contoh: `@bot bj bet 10000`).\n" +
+		"👉 `@bot bj bet <jumlah>` — Ubah taruhan (sama seperti `bet <jumlah>` tanpa tag).\n" +
 		"👉 `@bot bj mulai` — Memulai pembagian kartu secara manual.\n" +
 		"👉 `@bot bj status` — Melihat status permainan dan giliran saat ini.\n" +
-		"👉 `@bot bj leave` — Meninggalkan meja (sisa saldo meja dikembalikan ke wallet).\n" +
+		"👉 `@bot bj leave` — Meninggalkan meja (sama seperti `leave` tanpa tag).\n" +
 		"👉 `@bot bj guide` — Melihat panduan cara bermain blackjack.\n" +
 		"👉 `@bot bj help` — Melihat daftar perintah blackjack ini.\n\n" +
 		"*Aksi di Meja Game (Ketik Langsung Tanpa Tag Bot):*\n" +
-		"Ketik langsung saat giliran aktif Anda:\n" +
-		"👉 `hit` — Ambil kartu tambahan.\n" +
-		"👉 `stand` — Selesai mengambil kartu.\n" +
-		"👉 `double` — Gandakan taruhan dan ambil 1 kartu terakhir.\n\n" +
+		"Saat giliran aktif:\n" +
+		"👉 `hit` / `stand` / `double`\n" +
+		"Saat jeda antar ronde:\n" +
+		"👉 `bet <jumlah>` — Ubah taruhan sticky (contoh: `bet 10000`).\n" +
+		"👉 `leave` / `keluar` — Keluar meja (saldo meja dikembalikan ke wallet).\n\n" +
 		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	s.sendGroup(groupJID, msg)
 }
@@ -1155,7 +1189,7 @@ func (s *BlackjackService) formatCooldownFooter() string {
 	return fmt.Sprintf(
 		"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"+
 			"⏰ Ronde berikutnya dimulai dalam *%d detik*...\n"+
-			"Ubah taruhan dengan *@bot bj bet <jumlah>*.\n"+
+			"Ubah taruhan sticky: ketik *bet <jumlah>* (tanpa tag bot).\n"+
 			"Pemain baru dapat mengetik *@bot bj ikut <taruhan>* untuk bergabung.",
 		s.autoNextRoundSec,
 	)
