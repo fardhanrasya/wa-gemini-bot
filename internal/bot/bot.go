@@ -270,6 +270,45 @@ func (b *Bot) handleEconomy(ctx *eventContext) bool {
 	senderJID := ctx.msg.Info.Sender.ToNonAD().String()
 	_ = b.eco.UpdateName(senderJID, ctx.senderName)
 
+	if cleanText == "help" || cleanText == "menu" || cleanText == "bantuan" || cleanText == "tolong" {
+		var sb strings.Builder
+		sb.WriteString("🤖 *ABDUL BOT — DAFTAR PERINTAH* 🤖\n")
+		sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━\n")
+		sb.WriteString("Halo! Saya adalah bot asisten grup Anda. Berikut adalah daftar semua perintah yang bisa Anda gunakan:\n\n")
+
+		sb.WriteString("💰 *EKONOMI & PROFIL*\n")
+		sb.WriteString("* `@bot saldo` : Cek saldo chip dan pangkat aktif Anda.\n")
+		sb.WriteString("* `@bot leaderboard` : Tampilkan 10 pemain terkaya di grup ini.\n")
+		sb.WriteString("* `@bot ranks` : Tampilkan seluruh daftar pangkat dan persyaratannya.\n")
+		sb.WriteString("* `@bot setname <nama>` : Ubah nama tampilan Anda di bot (maksimal 20 karakter).\n")
+		sb.WriteString("* `@bot setname reset` : Kembalikan nama tampilan mengikuti profil WhatsApp Anda.\n")
+		sb.WriteString("* `@bot transfer @user <jumlah>` : Transfer chip Anda ke anggota grup lain.\n\n")
+
+		sb.WriteString("🃏 *POKER (TEXAS HOLD'EM)*\n")
+		sb.WriteString("* `@bot poker` : Membuat lobby game.\n")
+		sb.WriteString("* `@bot poker guide` : Tampilkan bantuan lengkap & panduan bermain poker.\n")
+		sb.WriteString("* `@bot poker help` : Tampilkan semua command dalam poker.\n")
+		sb.WriteString("* `@bot ikut` : Join ke dalam antrean/lobby permainan poker di grup.\n")
+		sb.WriteString("* `@bot mulai` : Memulai permainan poker jika lobby memiliki minimal 2 pemain.\n")
+		sb.WriteString("* `@bot status` : Tampilkan status game/lobby poker aktif saat ini.\n")
+		sb.WriteString("* `@bot stop` : Menghentikan permainan poker secara paksa (hanya untuk darurat).\n\n")
+
+		sb.WriteString("🖼️ *UTILITY*\n")
+		sb.WriteString("* `@bot upscale` : Tingkatkan resolusi/kualitas gambar (Gunakan sebagai balasan/reply pada gambar).\n\n")
+
+		sb.WriteString("🎁 *DONASI*\n")
+		sb.WriteString("* `@bot donasi <jumlah>` : Berdonasi via DOKU Payment (Mendukung QRIS, e-Wallet, dll).\n\n")
+
+		sb.WriteString("💬 *KECERDASAN BUATAN (AI)*\n")
+		sb.WriteString("* `@bot <pertanyaan>` : Tanya apa saja kepada AI! Cukup tag/mention saya di awal pesan.\n\n")
+
+		sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━\n")
+		sb.WriteString("💡 *Tips*: Kuis trivia otomatis akan muncul di grup ini secara berkala. Jawab dengan memilih opsi pada Polling untuk memenangkan chip gratis!")
+
+		b.sendToGroup(ctx.chatJID, sb.String())
+		return true
+	}
+
 	if strings.HasPrefix(cleanText, "setname ") || strings.HasPrefix(cleanText, "nickname ") {
 		var nameArg string
 		if strings.HasPrefix(cleanText, "setname ") {

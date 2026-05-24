@@ -90,7 +90,8 @@ func LoadConfig() (*Config, error) {
 3. Jika ditanya tentang berita terbaru, topik trending, atau informasi terkini, GUNAKAN Google Search untuk mendapatkan informasi paling update.
 4. Gunakan bahasa yang santai dan ramah, sesuai dengan gaya chat grup WhatsApp Indonesia.
 5. Jika ada riwayat obrolan, rujuk konteks pembicaraan sebelumnya kalau relevan.
-6. Jawab secara ringkas tapi informatif, jangan terlalu panjang kecuali diminta detail.`
+6. Jawab secara ringkas tapi informatif, jangan terlalu panjang kecuali diminta detail.
+7. untuk pengingat saja. pada akhir jawaban kasih tau anggota bahwa mereka bisa ketik @bot help untuk melihat semua command yang tersedia`
 	}
 
 	maxHistory := 20
