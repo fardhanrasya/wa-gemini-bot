@@ -20,9 +20,15 @@ import (
 // ==========================================================================
 
 const (
-	DealerJID            = "dealer@abdul.bot" // JID khusus untuk dealer bot
-	MinPlayers           = 1
+	DealerJID  = "dealer@abdul.bot" // JID khusus untuk dealer bot
+	MinPlayers = 1
 )
+
+// formatPlayerBalance menampilkan total aset di meja (chip + bet aktif) dan bet ronde ini.
+func formatPlayerBalance(p *BlackjackPlayer) string {
+	total := p.Chips + p.Bet
+	return fmt.Sprintf("Total di Meja: *%d* chip | Bet Aktif: *%d* chip", total, p.Bet)
+}
 
 // BlackjackService mengelola semua sesi blackjack aktif di grup.
 type BlackjackService struct {
@@ -298,8 +304,6 @@ func (s *BlackjackService) handleJoin(groupJID, senderName, senderJID string, be
 		return
 	}
 
-	isMejaKosong := (session.game.PlayerCount() == 0)
-
 	// 1. Cek apakah ini pemain lama yang ingin TOP-UP saldo meja
 	existingPlayer := session.game.GetPlayerByJID(senderJID)
 	if existingPlayer != nil {
@@ -325,13 +329,8 @@ func (s *BlackjackService) handleJoin(groupJID, senderName, senderJID string, be
 		p := session.game.GetPlayerByJID(senderJID)
 		if p != nil {
 			p.Chips += bet
-			if p.Bet <= 0 {
-				p.Bet = 100
-				if p.Chips < 100 {
-					p.Bet = p.Chips
-				}
-			}
-			s.sendGroup(groupJID, fmt.Sprintf("✅ *%s* melakukan top-up saldo meja sebesar *%d* chip! Total saldo meja Anda sekarang: *%d* chip.", p.Name, bet, p.Chips))
+			// Sticky bet tidak diubah saat top-up — pemain atur via @bot bj bet <jumlah>
+			s.sendGroup(groupJID, fmt.Sprintf("✅ *%s* melakukan top-up saldo meja sebesar *%d* chip! %s.", p.Name, bet, formatPlayerBalance(p)))
 		}
 		s.mu.Unlock()
 		return
@@ -391,26 +390,20 @@ func (s *BlackjackService) handleJoin(groupJID, senderName, senderJID string, be
 
 	playerCount := session.game.PlayerCount()
 	p := session.game.GetPlayerByJID(senderJID)
-	var betSize int
+	phase := session.game.Phase
+	var balanceLine string
 	if p != nil {
-		betSize = p.Bet
-	}
-
-	if isMejaKosong {
-		if session.roundTimer != nil {
-			session.roundTimer.Stop()
-		}
-		session.roundTimer = time.AfterFunc(10*time.Second, func() {
-			s.handleRoundCooldownTimeout(groupJID)
-		})
+		balanceLine = formatPlayerBalance(p)
 	}
 	s.mu.Unlock()
 
-	if isMejaKosong {
-		s.sendGroup(groupJID, fmt.Sprintf("✅ *%s* bergabung dengan saldo meja *%d* chip! (Taruhan ronde pertama: *%d* chip) (%d/%d)\n⏰ Ronde berikutnya dimulai dalam *10 detik*... Pemain baru masih dapat bergabung dengan *@bot bj ikut <taruhan>*.", senderName, bet, betSize, playerCount, MaxPlayers))
+	joinMsg := fmt.Sprintf("✅ *%s* bergabung! %s (%d/%d)", senderName, balanceLine, playerCount, MaxPlayers)
+	if phase == PhaseFinished {
+		joinMsg += fmt.Sprintf("\n⏰ Ronde berikutnya dimulai dalam *%d detik*... Ubah taruhan dengan *@bot bj bet <jumlah>*.", s.autoNextRoundSec)
 	} else {
-		s.sendGroup(groupJID, fmt.Sprintf("✅ *%s* bergabung dengan saldo meja *%d* chip! (Taruhan ronde pertama: *%d* chip) (%d/%d)", senderName, bet, betSize, playerCount, MaxPlayers))
+		joinMsg += "\nKetik *@bot bj mulai* atau tunggu lobby otomatis."
 	}
+	s.sendGroup(groupJID, joinMsg)
 }
 
 func (s *BlackjackService) handleSetBet(groupJID, senderName, senderJID string, bet int) {
@@ -473,112 +466,123 @@ func (s *BlackjackService) startGame(groupJID string) {
 	session.roundNumber++
 	session.startTime = time.Now()
 
-	_, err := session.game.StartRound()
+	roundInfo, err := session.game.StartRound()
 	if err != nil {
 		s.mu.Unlock()
 		s.sendGroup(groupJID, "❌ Gagal memulai game: "+err.Error())
 		return
 	}
+
+	roundNum := session.roundNumber
+	phase := session.game.Phase
+	dealerUp := session.game.DealerUpCard
+	currentPlayerIdx := session.game.CurrentPlayer
+
+	type playerSnapshot struct {
+		name, jid       string
+		cards           []Card
+		handValue       int
+		handType        string
+		bet, chips      int
+		status          PlayerStatus
+	}
+	players := make([]playerSnapshot, len(session.game.Players))
+	for i, p := range session.game.Players {
+		players[i] = playerSnapshot{
+			name:      p.Name,
+			jid:       p.JID,
+			cards:     append([]Card(nil), p.Hand.Cards...),
+			handValue: p.Hand.Value(),
+			handType:  s.getHandTypeString(p.Hand),
+			bet:       p.Bet,
+			chips:     p.Chips,
+			status:    p.Status,
+		}
+	}
 	s.mu.Unlock()
 
 	// 1. Kirim DM ke pemain
-	for _, p := range session.game.Players {
+	for _, p := range players {
 		dmText := fmt.Sprintf(
 			"🃏 *KARTU KAMU (Blackjack Ronde #%d)* 🃏\n"+
 				"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"+
 				"%s\n"+
 				"Total nilai: *%d* (%s)\n"+
-				"Taruhan: *%d* chip\n"+
+				"Total di Meja: *%d* chip | Bet Aktif: *%d* chip\n"+
 				"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"+
 				"Ketik langsung *hit*, *stand*, atau *double* di grup untuk bermain!",
-			session.roundNumber,
-			RenderCards(p.Hand.Cards),
-			p.Hand.Value(),
-			s.getHandTypeString(p.Hand),
-			p.Bet,
+			roundNum,
+			RenderCards(p.cards),
+			p.handValue,
+			p.handType,
+			p.chips+p.bet,
+			p.bet,
 		)
-		s.sendDM(p.JID, dmText)
+		s.sendDM(p.jid, dmText)
 	}
 
 	// 2. Tampilkan info awal di grup
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("🎮 *BLACKJACK — RONDE #%d* 🎮\n", session.roundNumber))
+	sb.WriteString(fmt.Sprintf("🎮 *BLACKJACK — RONDE #%d* 🎮\n", roundNum))
 	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
-	sb.WriteString(fmt.Sprintf("🎰 *Dealer Upcard*: %s\n\n", RenderCards([]Card{session.game.DealerUpCard})))
+	sb.WriteString(fmt.Sprintf("🎰 *Dealer Upcard*: %s\n\n", RenderCards([]Card{dealerUp})))
+	if roundInfo != nil && len(roundInfo.BetAdjustments) > 0 {
+		sb.WriteString("⚠️ *Penyesuaian taruhan otomatis (all-in):*\n")
+		for _, adj := range roundInfo.BetAdjustments {
+			sb.WriteString(fmt.Sprintf("  • *%s*: Bet Aktif diturunkan *%d* → *%d* chip (all-in, total meja tidak cukup)\n",
+				adj.PlayerName, adj.OldBet, adj.NewBet))
+		}
+		sb.WriteString("\n")
+	}
 	sb.WriteString("👥 *Status Pemain*:\n")
-	for _, p := range session.game.Players {
+	for _, p := range players {
 		statusStr := ""
-		if p.Status == StatusBlackjack {
+		if p.status == StatusBlackjack {
 			statusStr = " 🔥 *BLACKJACK!*"
 		}
-		sb.WriteString(fmt.Sprintf("  • *%s*: %d chip %s\n", p.Name, p.Bet, statusStr))
+		sb.WriteString(fmt.Sprintf("  • *%s*: %s%s\n", p.name, formatPlayerBalance(&BlackjackPlayer{Chips: p.chips, Bet: p.bet}), statusStr))
 	}
 	sb.WriteString("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
-	if session.game.Phase == PhaseFinished {
+	if phase == PhaseFinished {
 		sb.WriteString("⚠️ *Dealer memiliki Blackjack natural!* Game berakhir.\n\n")
 
 		s.mu.Lock()
-		results := session.game.DetermineWinners()
-		s.mu.Unlock()
-
-		sb.WriteString("🏆 *BLACKJACK RESULTS* 🏆\n")
-		sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
-
-		s.mu.Lock()
-		for _, r := range results {
-			// Update table chips (add payout directly to chips balance)
-			p := session.game.GetPlayer(r.PlayerName)
-			if p != nil {
-				p.Chips += r.Payout
-			}
-
-			var detail string
-			switch r.Outcome {
-			case "blackjack":
-				detail = fmt.Sprintf("🔥 *BLACKJACK!* Menang *%d* chip (3:2 payout)", r.Payout)
-			case "win":
-				detail = fmt.Sprintf("✅ *MENANG* biasa! Menerima *%d* chip (1:1 payout)", r.Payout)
-			case "push":
-				detail = fmt.Sprintf("🤝 *SERI (Push)*. Taruhan *%d* chip dikembalikan", r.Payout)
-			case "lose":
-				detail = "❌ *KALAH*. Taruhan disita bandar"
-			}
-			sb.WriteString(fmt.Sprintf("👤 *%s*: %s\n", r.PlayerName, detail))
+		session, ok := s.sessions[groupJID]
+		if !ok {
+			s.mu.Unlock()
+			return
 		}
+		results := session.game.DetermineWinners()
+		s.applyTablePayouts(groupJID, session.game, results)
 		s.mu.Unlock()
 
-		sb.WriteString("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-		sb.WriteString("⏰ Ronde berikutnya dimulai dalam *10 detik*...\n")
-		sb.WriteString("Pemain baru dapat mengetik *@bot bj ikut <taruhan>* sekarang untuk bergabung.")
+		sb.WriteString(s.formatResultsBlock(results))
+		sb.WriteString(s.formatCooldownFooter())
 
 		s.sendGroup(groupJID, sb.String())
-
-		s.mu.Lock()
-		session.roundTimer = time.AfterFunc(10*time.Second, func() {
-			s.handleRoundCooldownTimeout(groupJID)
-		})
-		s.mu.Unlock()
+		s.scheduleRoundCooldown(groupJID)
 		return
 	}
 
 	// Cari pemain aktif pertama
 	activePlayer := ""
-	s.mu.Lock()
-	if session.game.CurrentPlayer < len(session.game.Players) {
-		activePlayer = session.game.Players[session.game.CurrentPlayer].Name
+	activeJID := ""
+	if currentPlayerIdx < len(players) {
+		activePlayer = players[currentPlayerIdx].name
+		activeJID = players[currentPlayerIdx].jid
 	}
-	s.mu.Unlock()
 
 	if activePlayer != "" {
 		sb.WriteString(fmt.Sprintf("🎯 Giliran: *@%s*\n", activePlayer))
 		sb.WriteString("Ketik langsung: *hit*, *stand*, atau *double*")
-		
-		playerJID := session.game.GetPlayer(activePlayer).JID
-		s.sendGroupMention(groupJID, sb.String(), []string{playerJID})
+
+		s.sendGroupMention(groupJID, sb.String(), []string{activeJID})
 
 		s.mu.Lock()
-		s.startTurnTimer(groupJID, session)
+		if session, ok := s.sessions[groupJID]; ok {
+			s.startTurnTimer(groupJID, session)
+		}
 		s.mu.Unlock()
 	} else {
 		s.sendGroup(groupJID, sb.String())
@@ -810,39 +814,14 @@ func (s *BlackjackService) playDealerTurn(groupJID string) {
 	sb.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 	s.mu.Lock()
-	for _, r := range results {
-		// Update table chips (add payout directly to chips balance)
-		p := session.game.GetPlayer(r.PlayerName)
-		if p != nil {
-			p.Chips += r.Payout
-		}
-
-		var detail string
-		switch r.Outcome {
-		case "blackjack":
-			detail = fmt.Sprintf("🔥 *BLACKJACK!* Menang *%d* chip (3:2 payout)", r.Payout)
-		case "win":
-			detail = fmt.Sprintf("✅ *MENANG* biasa! Menerima *%d* chip (1:1 payout)", r.Payout)
-		case "push":
-			detail = fmt.Sprintf("🤝 *SERI (Push)*. Taruhan *%d* chip dikembalikan", r.Payout)
-		case "lose":
-			detail = "❌ *KALAH*. Taruhan disita bandar"
-		}
-		sb.WriteString(fmt.Sprintf("👤 *%s*: %s\n", r.PlayerName, detail))
-	}
+	s.applyTablePayouts(groupJID, session.game, results)
 	s.mu.Unlock()
 
-	sb.WriteString("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-	sb.WriteString("⏰ Ronde berikutnya dimulai dalam *10 detik*...\n")
-	sb.WriteString("Pemain baru dapat mengetik *@bot bj ikut <taruhan>* sekarang untuk bergabung.")
+	sb.WriteString(s.formatResultsBlock(results))
+	sb.WriteString(s.formatCooldownFooter())
 
 	s.sendGroup(groupJID, sb.String())
-
-	s.mu.Lock()
-	session.roundTimer = time.AfterFunc(10*time.Second, func() {
-		s.handleRoundCooldownTimeout(groupJID)
-	})
-	s.mu.Unlock()
+	s.scheduleRoundCooldown(groupJID)
 }
 
 func (s *BlackjackService) handleRoundCooldownTimeout(groupJID string) {
@@ -853,23 +832,27 @@ func (s *BlackjackService) handleRoundCooldownTimeout(groupJID string) {
 		return
 	}
 
-	// 1. Identifikasi pemain yang kehabisan chip (saldo meja <= 0)
-	var playersToRemove []string
+	// 1. Identifikasi pemain yang kehabisan chip di meja (setelah ronde selesai)
+	type playerRemoval struct {
+		name string
+		jid  string
+	}
+	var playersToRemove []playerRemoval
 	for _, p := range session.game.Players {
 		if p.Chips <= 0 {
-			playersToRemove = append(playersToRemove, p.Name)
+			playersToRemove = append(playersToRemove, playerRemoval{name: p.Name, jid: p.JID})
 		}
 	}
 
-	// 2. Hapus pemain yang kehabisan chip dari meja
-	for _, name := range playersToRemove {
-		session.game.RemovePlayer(name)
+	// 2. Hapus pemain yang kehabisan chip dari meja (tidak ada refund — chip meja sudah 0)
+	for _, pr := range playersToRemove {
+		session.game.RemovePlayer(pr.name)
 	}
 	s.mu.Unlock()
 
 	// Kirim notifikasi jika ada pemain yang dikeluarkan
-	for _, name := range playersToRemove {
-		s.sendGroup(groupJID, fmt.Sprintf("⚠️ *%s* dikeluarkan dari meja blackjack karena kehabisan chip di meja (*0* chip). Silakan buy-in lagi dengan *@bot bj ikut <nominal>*.", name))
+	for _, pr := range playersToRemove {
+		s.sendGroup(groupJID, fmt.Sprintf("⚠️ *%s* dikeluarkan dari meja blackjack karena kehabisan chip di meja (*0* chip). Silakan buy-in lagi dengan *@bot bj ikut <nominal>*.", pr.name))
 	}
 
 	s.mu.Lock()
@@ -950,13 +933,9 @@ func (s *BlackjackService) handleLeave(groupJID, senderName, senderJID string) {
 
 	refunded := false
 	if chipsToRefund > 0 {
-		if s.onSubtractBalance != nil {
-			_ = s.onSubtractBalance(DealerJID, chipsToRefund, "blackjack_refund_dealer", groupJID)
-		}
 		if s.onAddBalance != nil {
-			if err := s.onAddBalance(senderJID, chipsToRefund, "blackjack_refund", groupJID); err == nil {
-				refunded = true
-			}
+			s.refundTableChips(senderJID, chipsToRefund, groupJID)
+			refunded = true
 		}
 	}
 
@@ -1067,7 +1046,7 @@ func (s *BlackjackService) handleStatus(groupJID string) {
 		} else {
 			statusDetail = fmt.Sprintf(" (%s)", p.Status.String())
 		}
-		sb.WriteString(fmt.Sprintf("  • *%s*: %d chip%s\n", p.Name, p.Bet, statusDetail))
+		sb.WriteString(fmt.Sprintf("  • *%s*: %s%s\n", p.Name, formatPlayerBalance(p), statusDetail))
 	}
 	sb.WriteString("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
@@ -1092,6 +1071,10 @@ func (s *BlackjackService) handleGuide(groupJID string) {
 		"• *Kemenangan Biasa*: Dibayar *1:1* (2x taruhan).\n" +
 		"• *Seri (Push)*: Kartu bernilai sama dengan dealer, taruhan dikembalikan (1x taruhan).\n" +
 		"• *Kalah* / *Bust* (>21): Taruhan ditarik bandar.\n\n" +
+		"*4. Taruhan:*\n" +
+		"• Taruhan ronde berikutnya mengikuti ronde sebelumnya (bukan all-in otomatis).\n" +
+		"• Ubah taruhan saat jeda antar ronde: `@bot bj bet <jumlah>`.\n" +
+		"• Jika saldo meja kurang dari taruhan, sistem otomatis all-in (taruhan = seluruh saldo meja).\n\n" +
 		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
 		"Mulai meja game baru sekarang dengan mengetik *@bot bj*!"
 	s.sendGroup(groupJID, msg)
@@ -1104,7 +1087,7 @@ func (s *BlackjackService) handleHelp(groupJID string) {
 		"*Mengelola Game (Pake Tag/Mention):*\n" +
 		"👉 `@bot bj` — Membuat lobby game blackjack baru.\n" +
 		"👉 `@bot bj ikut <saldo>` — Beli/top-up saldo meja blackjack (contoh: `@bot bj ikut 5000`).\n" +
-		"👉 `@bot bj bet <jumlah>` — Atur jumlah taruhan aktif ronde berikutnya (contoh: `@bot bj bet 500`).\n" +
+		"👉 `@bot bj bet <jumlah>` — Ubah taruhan antar ronde saat jeda cooldown (contoh: `@bot bj bet 10000`).\n" +
 		"👉 `@bot bj mulai` — Memulai pembagian kartu secara manual.\n" +
 		"👉 `@bot bj status` — Melihat status permainan dan giliran saat ini.\n" +
 		"👉 `@bot bj leave` — Meninggalkan meja (sisa saldo meja dikembalikan ke wallet).\n" +
@@ -1117,6 +1100,76 @@ func (s *BlackjackService) handleHelp(groupJID string) {
 		"👉 `double` — Gandakan taruhan dan ambil 1 kartu terakhir.\n\n" +
 		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	s.sendGroup(groupJID, msg)
+}
+
+// applyTablePayouts menambahkan payout ke saldo meja dan memotong bank dealer.
+func (s *BlackjackService) applyTablePayouts(groupJID string, game *BlackjackGame, results []WinResult) {
+	for _, r := range results {
+		p := game.GetPlayer(r.PlayerName)
+		if p != nil {
+			p.Chips += r.Payout
+		}
+		if r.Payout > 0 && s.onSubtractBalance != nil {
+			_ = s.onSubtractBalance(DealerJID, r.Payout, "blackjack_payout", groupJID)
+		}
+	}
+}
+
+func (s *BlackjackService) formatResultsBlock(results []WinResult) string {
+	var sb strings.Builder
+	for _, r := range results {
+		var detail string
+		switch r.Outcome {
+		case "blackjack":
+			detail = fmt.Sprintf("🔥 *BLACKJACK!* Menang *%d* chip (3:2 payout)", r.Payout)
+		case "win":
+			detail = fmt.Sprintf("✅ *MENANG* biasa! Menerima *%d* chip (1:1 payout)", r.Payout)
+		case "push":
+			detail = fmt.Sprintf("🤝 *SERI (Push)*. Taruhan *%d* chip dikembalikan", r.Payout)
+		case "lose":
+			detail = "❌ *KALAH*. Taruhan disita bandar"
+		}
+		sb.WriteString(fmt.Sprintf("👤 *%s*: %s\n", r.PlayerName, detail))
+	}
+	return sb.String()
+}
+
+func (s *BlackjackService) formatCooldownFooter() string {
+	return fmt.Sprintf(
+		"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"+
+			"⏰ Ronde berikutnya dimulai dalam *%d detik*...\n"+
+			"Ubah taruhan dengan *@bot bj bet <jumlah>*.\n"+
+			"Pemain baru dapat mengetik *@bot bj ikut <taruhan>* untuk bergabung.",
+		s.autoNextRoundSec,
+	)
+}
+
+func (s *BlackjackService) scheduleRoundCooldown(groupJID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[groupJID]
+	if !ok {
+		return
+	}
+	if session.roundTimer != nil {
+		session.roundTimer.Stop()
+	}
+	delay := time.Duration(s.autoNextRoundSec) * time.Second
+	session.roundTimer = time.AfterFunc(delay, func() {
+		s.handleRoundCooldownTimeout(groupJID)
+	})
+}
+
+func (s *BlackjackService) refundTableChips(jid string, chips int, groupJID string) {
+	if chips <= 0 {
+		return
+	}
+	if s.onSubtractBalance != nil {
+		_ = s.onSubtractBalance(DealerJID, chips, "blackjack_refund_dealer", groupJID)
+	}
+	if s.onAddBalance != nil {
+		_ = s.onAddBalance(jid, chips, "blackjack_refund", groupJID)
+	}
 }
 
 func (s *BlackjackService) cleanupSession(session *blackjackSession) {
@@ -1132,14 +1185,7 @@ func (s *BlackjackService) cleanupSession(session *blackjackSession) {
 
 	// Refund semua sisa chip pemain yang masih di meja ke saldo utama
 	for _, p := range session.game.Players {
-		if p.Chips > 0 {
-			if s.onSubtractBalance != nil {
-				_ = s.onSubtractBalance(DealerJID, p.Chips, "blackjack_refund_dealer", "")
-			}
-			if s.onAddBalance != nil {
-				_ = s.onAddBalance(p.JID, p.Chips, "blackjack_refund", "")
-			}
-		}
+		s.refundTableChips(p.JID, p.Chips, "")
 	}
 }
 

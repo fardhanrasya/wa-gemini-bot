@@ -114,10 +114,18 @@ type PlayerInfo struct {
 	Bet  int
 }
 
+// BetAdjustment records when sticky bet was lowered due to insufficient table chips.
+type BetAdjustment struct {
+	PlayerName string
+	OldBet     int
+	NewBet     int
+}
+
 // RoundStartInfo holds details of a newly started round
 type RoundStartInfo struct {
-	Players      []PlayerInfo
-	DealerUpCard Card
+	Players         []PlayerInfo
+	DealerUpCard    Card
+	BetAdjustments  []BetAdjustment
 }
 
 // DealerResult holds details of the dealer's final hand
@@ -161,12 +169,13 @@ func (g *BlackjackGame) AddPlayer(name, jid string, chips int) error {
 		}
 	}
 
+	// Sticky bet: taruhan awal mengikuti buy-in; tetap dipertahankan antar ronde via Reset().
 	player := &BlackjackPlayer{
 		Name:   name,
 		JID:    jid,
 		Hand:   NewHand(),
 		Chips:  chips,
-		Bet:    chips,
+		Bet:    chips, // taruhan ronde pertama = nominal buy-in
 		Status: StatusActive,
 	}
 
@@ -261,11 +270,24 @@ func (g *BlackjackGame) StartRound() (*RoundStartInfo, error) {
 		return nil, ErrNoPlayers
 	}
 
-	// Deduct active round bets from table chips (buy-in stack)
+	// Sticky bet: pertahankan taruhan ronde sebelumnya; kurangi otomatis jika saldo meja tidak cukup (all-in).
+	var adjustments []BetAdjustment
 	for _, p := range g.Players {
-		if p.Chips < p.Bet {
+		originalBet := p.Bet
+		if p.Bet <= 0 {
 			if p.Chips > 0 {
 				p.Bet = p.Chips
+			} else {
+				p.Bet = 0
+			}
+		} else if p.Chips < p.Bet {
+			if p.Chips > 0 {
+				p.Bet = p.Chips // all-in: taruhan diturunkan ke seluruh saldo meja
+				adjustments = append(adjustments, BetAdjustment{
+					PlayerName: p.Name,
+					OldBet:     originalBet,
+					NewBet:     p.Bet,
+				})
 			} else {
 				p.Bet = 0
 			}
@@ -307,8 +329,9 @@ func (g *BlackjackGame) StartRound() (*RoundStartInfo, error) {
 	}
 
 	info := &RoundStartInfo{
-		Players:      pInfos,
-		DealerUpCard: g.DealerUpCard,
+		Players:        pInfos,
+		DealerUpCard:   g.DealerUpCard,
+		BetAdjustments: adjustments,
 	}
 
 	// 4. Check for dealer blackjack
