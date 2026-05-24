@@ -12,6 +12,7 @@ import (
 	"wa-gemini-bot/internal/economy"
 	"wa-gemini-bot/internal/media"
 	"wa-gemini-bot/internal/memory"
+	"wa-gemini-bot/internal/blackjack"
 	"wa-gemini-bot/internal/payment"
 	"wa-gemini-bot/internal/poker"
 	"wa-gemini-bot/internal/trivia"
@@ -41,9 +42,10 @@ type Bot struct {
 	memory *memory.GroupMemory
 	config *config.Config
 	doku   *payment.DokuService   // nil jika fitur donasi tidak aktif
-	trivia *trivia.TriviaService // nil jika fitur trivia tidak aktif
-	poker  *poker.PokerService   // nil jika fitur poker tidak aktif
-	eco    *economy.EconomyService
+	trivia    *trivia.TriviaService // nil jika fitur trivia tidak aktif
+	poker     *poker.PokerService   // nil jika fitur poker tidak aktif
+	blackjack *blackjack.BlackjackService // nil jika fitur blackjack tidak aktif
+	eco       *economy.EconomyService
 	cld    *media.CloudinaryService // nil jika tidak dikonfigurasi
 }
 
@@ -62,7 +64,7 @@ type eventContext struct {
 // NewBot membuat Bot baru yang siap di-Start().
 // Constructor ini "deep" — menyembunyikan semua setup database, device store,
 // dan event wiring. Caller hanya perlu pass dependency, lalu Start().
-func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku *payment.DokuService, trivia *trivia.TriviaService, poker *poker.PokerService, eco *economy.EconomyService, cld *media.CloudinaryService) (*Bot, error) {
+func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku *payment.DokuService, trivia *trivia.TriviaService, poker *poker.PokerService, blackjack *blackjack.BlackjackService, eco *economy.EconomyService, cld *media.CloudinaryService) (*Bot, error) {
 	ctx := context.Background()
 
 	dbLog := waLog.Stdout("Database", "WARN", true)
@@ -85,10 +87,11 @@ func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku 
 		memory: mem,
 		config: cfg,
 		doku:   doku,
-		trivia: trivia,
-		poker:  poker,
-		eco:    eco,
-		cld:    cld,
+		trivia:    trivia,
+		poker:     poker,
+		blackjack: blackjack,
+		eco:       eco,
+		cld:       cld,
 	}
 
 	client.AddEventHandler(bot.handleEvent)
@@ -108,12 +111,19 @@ func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku 
 		poker.SetCallbacks(bot.sendToGroup, bot.sendToGroupWithMentions, bot.sendDM, mem.Record, eco.AddBalance, eco.SubtractBalance)
 	}
 
+	// Daftarkan callback blackjack — siklus "Blackjack → Bot → WhatsApp"
+	if blackjack != nil {
+		blackjack.SetCallbacks(bot.sendToGroup, bot.sendToGroupWithMentions, bot.sendDM, mem.Record, eco.AddBalance, eco.SubtractBalance)
+	}
+
 	return bot, nil
 }
 
-// Start menghubungkan bot ke WhatsApp.
-// Jika belum login, menampilkan QR code untuk di-scan.
+// Start menghubungkan bot ke WhatsApp dan menjalankan HTTP server (DOKU Webhook + Admin Panel).
 func (b *Bot) Start() error {
+	// Jalankan HTTP server gabungan secara background
+	go b.StartHTTPServer(b.config.DokuWebhookPort)
+
 	if b.client.Store.ID == nil {
 		return b.connectWithQR()
 	}
@@ -191,6 +201,16 @@ func (b *Bot) handleMessage(v *events.Message) {
 		}
 	}
 
+	// Blackjack game actions (hit/stand/double) — intercept SEBELUM
+	// mention check karena aksi ini tidak perlu mention bot.
+	// Hanya dicek jika ada game blackjack aktif di grup ini.
+	if b.blackjack != nil && b.blackjack.IsActive(chatJID) {
+		rawAction := strings.TrimSpace(rawText)
+		if b.blackjack.HandleGameAction(chatJID, senderName, rawAction) {
+			return
+		}
+	}
+
 	if !b.isMentioningMe(v) {
 		return
 	}
@@ -237,8 +257,28 @@ func (b *Bot) handleMessage(v *events.Message) {
 		mimeType:   mimeType,
 	}
 
-	// Dispatch ke handler yang sesuai — poker mention commands diperiksa dulu
+	// Interseptor perintah leave/keluar kontekstual (diawali @mention bot)
+	cleanLower := strings.ToLower(cleanText)
+	if cleanLower == "leave" || cleanLower == "keluar" {
+		senderJID := ctx.msg.Info.Sender.ToNonAD().String()
+		if b.blackjack != nil && b.blackjack.IsPlayerInGame(chatJID, senderJID) {
+			ctx.cleanText = "bj leave"
+		} else if b.poker != nil && b.poker.IsPlayerInGame(chatJID, senderName) {
+			// Biarkan "leave"/"keluar" untuk di-handle poker
+		} else {
+			// Fallback jika tidak aktif di game mana pun tetapi salah satu game aktif di grup
+			if b.blackjack != nil && b.blackjack.IsActive(chatJID) {
+				ctx.cleanText = "bj leave"
+			}
+		}
+	}
+
+	// Dispatch ke handler yang sesuai — poker & blackjack mention commands diperiksa dulu
 	if b.handlePokerMention(ctx) {
+		return
+	}
+
+	if b.handleBlackjackMention(ctx) {
 		return
 	}
 
@@ -290,8 +330,18 @@ func (b *Bot) handleEconomy(ctx *eventContext) bool {
 		sb.WriteString("* `@bot poker help` : Tampilkan semua command dalam poker.\n")
 		sb.WriteString("* `@bot ikut` : Join ke dalam antrean/lobby permainan poker di grup.\n")
 		sb.WriteString("* `@bot mulai` : Memulai permainan poker jika lobby memiliki minimal 2 pemain.\n")
-		sb.WriteString("* `@bot status` : Tampilkan status game/lobby poker aktif saat ini.\n")
-		sb.WriteString("* `@bot stop` : Menghentikan permainan poker secara paksa (hanya untuk darurat).\n\n")
+		sb.WriteString("* `@bot leave` : Keluar dari meja poker.\n")
+		sb.WriteString("* `@bot status` : Tampilkan status game/lobby poker aktif saat ini.\n\n")
+
+		sb.WriteString("🎰 *BLACKJACK (21)*\n")
+		sb.WriteString("* `@bot bj` : Membuat lobby game blackjack baru.\n")
+		sb.WriteString("* `@bot bj guide` : Tampilkan panduan cara bermain blackjack.\n")
+		sb.WriteString("* `@bot bj help` : Tampilkan semua command dalam blackjack.\n")
+		sb.WriteString("* `@bot bj ikut <saldo>` : Beli/top-up saldo meja blackjack (seperti poker).\n")
+		sb.WriteString("* `@bot bj bet <jumlah>` : Atur jumlah taruhan aktif untuk ronde berikutnya.\n")
+		sb.WriteString("* `@bot bj mulai` : Memulai permainan blackjack secara manual.\n")
+		sb.WriteString("* `@bot bj status` : Tampilkan status game blackjack aktif.\n")
+		sb.WriteString("* `@bot bj leave` : Keluar dari meja blackjack (sisa saldo meja dikembalikan ke wallet).\n\n")
 
 		sb.WriteString("🖼️ *UTILITY*\n")
 		sb.WriteString("* `@bot upscale` : Tingkatkan resolusi/kualitas gambar (Gunakan sebagai balasan/reply pada gambar).\n\n")

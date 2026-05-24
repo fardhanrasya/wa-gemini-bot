@@ -12,7 +12,10 @@ import (
 )
 
 const (
-	InitialBalance = 5000 // Modal awal yang diberikan ke pemain baru
+	InitialBalance       = 5000                   // Modal awal yang diberikan ke pemain baru
+	DealerJID            = "dealer@abdul.bot" // JID khusus untuk dealer bot
+	DealerName           = "🎰 Dealer Bot"
+	DealerInitialBalance = 1000000000 // 1 miliar chip untuk dealer
 )
 
 var (
@@ -100,14 +103,64 @@ func NewEconomyService(dbPath string) (*EconomyService, error) {
 	// Migrasi database: tambahkan kolom name_is_custom secara aman jika belum ada
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN name_is_custom INTEGER DEFAULT 0;")
 
-	return &EconomyService{
+	service := &EconomyService{
 		db: db,
-	}, nil
+	}
+
+	// Initialize dealer account untuk blackjack
+	if err := service.InitializeDealerAccount(); err != nil {
+		return nil, fmt.Errorf("gagal inisialisasi akun dealer: %w", err)
+	}
+
+	return service, nil
 }
 
 // Close menutup koneksi database.
 func (s *EconomyService) Close() error {
 	return s.db.Close()
+}
+
+// InitializeDealerAccount membuat akun khusus untuk dealer bot blackjack.
+// Akun ini digunakan untuk tracking keluar-masuk chip melalui ledger.
+// Dealer memiliki saldo awal yang sangat besar untuk memastikan selalu bisa membayar.
+func (s *EconomyService) InitializeDealerAccount() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Cek apakah dealer sudah ada
+	var balance int
+	err := s.db.QueryRow("SELECT balance FROM users WHERE jid = ?", DealerJID).Scan(&balance)
+	if err == nil {
+		// Dealer sudah ada, tidak perlu inisialisasi ulang
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("gagal memulai transaksi dealer init: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Buat akun dealer dengan nama kustom (name_is_custom = 1)
+	_, err = tx.Exec(
+		"INSERT INTO users (jid, name, balance, name_is_custom) VALUES (?, ?, ?, 1)",
+		DealerJID, DealerName, DealerInitialBalance,
+	)
+	if err != nil {
+		return fmt.Errorf("gagal membuat akun dealer: %w", err)
+	}
+
+	// Log transaksi inisialisasi dealer
+	if err := logTransaction(tx, DealerJID, DealerInitialBalance, DealerInitialBalance, "dealer_init", "system"); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("gagal commit dealer init: %w", err)
+	}
+
+	log.Printf("[ECONOMY] Akun dealer diinisialisasi dengan saldo %d", DealerInitialBalance)
+	return nil
 }
 
 // UpdateName mengupdate nama tampilan pengguna untuk keperluan leaderboard.
@@ -156,7 +209,7 @@ func (s *EconomyService) GetLeaderboard(limit int) ([]User, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.Query("SELECT jid, name, balance FROM users ORDER BY balance DESC LIMIT ?", limit)
+	rows, err := s.db.Query("SELECT jid, name, balance FROM users WHERE jid != ? ORDER BY balance DESC LIMIT ?", DealerJID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("gagal mengambil leaderboard: %w", err)
 	}
@@ -474,4 +527,72 @@ func logTransaction(tx *sql.Tx, jid string, amount, balanceAfter int, txType, re
 		return fmt.Errorf("gagal mencatat transaksi: %w", err)
 	}
 	return nil
+}
+
+// SetBalance langsung menetapkan saldo pengguna (untuk admin panel).
+func (s *EconomyService) SetBalance(jid string, amount int, reference string) error {
+	if amount < 0 {
+		return ErrInvalidAmount
+	}
+
+	// Pastikan user terdaftar
+	_, err := s.GetBalance(jid)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("gagal memulai transaksi set balance: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec("UPDATE users SET balance = ? WHERE jid = ?", amount, jid)
+	if err != nil {
+		return fmt.Errorf("gagal set balance: %w", err)
+	}
+
+	if err := logTransaction(tx, jid, amount, amount, "admin_set", reference); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("gagal commit set balance: %w", err)
+	}
+
+	log.Printf("[ECONOMY] Admin set balance %s to %d (%s)", jid, amount, reference)
+	return nil
+}
+
+// SearchUsers mencari pengguna berdasarkan nama atau JID (untuk admin panel).
+func (s *EconomyService) SearchUsers(query string) ([]User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var rows *sql.Rows
+	var err error
+	if query == "" {
+		rows, err = s.db.Query("SELECT jid, name, balance FROM users ORDER BY balance DESC")
+	} else {
+		likeQuery := "%" + query + "%"
+		rows, err = s.db.Query("SELECT jid, name, balance FROM users WHERE name LIKE ? OR jid LIKE ? ORDER BY balance DESC", likeQuery, likeQuery)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("gagal mencari user: %w", err)
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.JID, &u.Name, &u.Balance); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, nil
 }

@@ -44,6 +44,11 @@ type Config struct {
 	PokerTurnTimeoutSec   int // default 60
 	PokerAutoNextRoundSec int // default 5
 
+	// Blackjack Game
+	BlackjackEnabled          bool
+	BlackjackTurnTimeoutSec   int
+	BlackjackAutoNextRoundSec int
+
 	// Cloudinary
 	CloudinaryURL string
 }
@@ -165,6 +170,21 @@ func LoadConfig() (*Config, error) {
 		}
 	}
 
+	// Blackjack Config — opsional. Default: nonaktif.
+	blackjackEnabled := os.Getenv("BLACKJACK_ENABLED") == "true" || os.Getenv("BLACKJACK_ENABLED") == "1"
+	blackjackTurnTimeout := 60
+	if v := os.Getenv("BLACKJACK_TURN_TIMEOUT_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			blackjackTurnTimeout = n
+		}
+	}
+	blackjackAutoNextRound := 10
+	if v := os.Getenv("BLACKJACK_AUTO_NEXT_ROUND_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			blackjackAutoNextRound = n
+		}
+	}
+
 	cloudinaryURL := os.Getenv("CLOUDINARY_URL")
 
 	return &Config{
@@ -192,6 +212,10 @@ func LoadConfig() (*Config, error) {
 		PokerBigBlind:         pokerBigBlind,
 		PokerTurnTimeoutSec:   pokerTurnTimeout,
 		PokerAutoNextRoundSec: pokerAutoNextRound,
+
+		BlackjackEnabled:          blackjackEnabled,
+		BlackjackTurnTimeoutSec:   blackjackTurnTimeout,
+		BlackjackAutoNextRoundSec: blackjackAutoNextRound,
 
 		CloudinaryURL: cloudinaryURL,
 	}, nil

@@ -235,6 +235,11 @@ func (d *DokuService) StartWebhookServer(port string) {
 	}
 }
 
+// HandleWebhook memproses notifikasi pembayaran dari DOKU (public wrapper).
+func (d *DokuService) HandleWebhook(w http.ResponseWriter, r *http.Request) {
+	d.handleWebhook(w, r)
+}
+
 // handleWebhook memproses notifikasi pembayaran dari DOKU.
 // Mencocokkan invoice number dengan pending donations, lalu trigger callback.
 func (d *DokuService) handleWebhook(w http.ResponseWriter, r *http.Request) {

@@ -13,6 +13,7 @@ import (
 	"wa-gemini-bot/internal/media"
 	"wa-gemini-bot/internal/memory"
 	"wa-gemini-bot/internal/payment"
+	"wa-gemini-bot/internal/blackjack"
 	"wa-gemini-bot/internal/poker"
 	"wa-gemini-bot/internal/trivia"
 )
@@ -48,7 +49,7 @@ func main() {
 	if cfg.DokuEnabled {
 		doku = payment.NewDokuService(cfg)
 		log.Printf("DOKU Checkout ready (sandbox: %v, webhook port: %s)", cfg.DokuIsSandbox, cfg.DokuWebhookPort)
-		go doku.StartWebhookServer(cfg.DokuWebhookPort)
+		// go doku.StartWebhookServer(cfg.DokuWebhookPort) // HTTP Server gabungan (Webhook + Admin Panel) dijalankan di dalam bot.Start()
 	} else {
 		log.Println("DOKU tidak aktif — fitur donasi dinonaktifkan (set DOKU_* env vars untuk mengaktifkan)")
 	}
@@ -80,6 +81,19 @@ func main() {
 		log.Println("Poker tidak aktif — set POKER_ENABLED=true untuk mengaktifkan")
 	}
 
+	// Blackjack — opsional, aktif hanya jika BLACKJACK_ENABLED=true
+	var bj *blackjack.BlackjackService
+	if cfg.BlackjackEnabled {
+		bj = blackjack.NewBlackjackService(
+			cfg.BlackjackTurnTimeoutSec,
+			cfg.BlackjackAutoNextRoundSec,
+		)
+		log.Printf("Blackjack ready (timeout: %ds, auto-next: %ds)",
+			cfg.BlackjackTurnTimeoutSec, cfg.BlackjackAutoNextRoundSec)
+	} else {
+		log.Println("Blackjack tidak aktif — set BLACKJACK_ENABLED=true untuk mengaktifkan")
+	}
+
 	// Economy — selalu aktif sebagai base layer
 	eco, err := economy.NewEconomyService("data/wa-economy.db")
 	if err != nil {
@@ -98,7 +112,7 @@ func main() {
 		log.Println("Cloudinary tidak aktif — set CLOUDINARY_URL untuk mengaktifkan fitur upscale")
 	}
 
-	b, err := bot.NewBot(cfg, ai, mem, doku, triv, pok, eco, cld)
+	b, err := bot.NewBot(cfg, ai, mem, doku, triv, pok, bj, eco, cld)
 	if err != nil {
 		log.Fatalf("Bot error: %v", err)
 	}

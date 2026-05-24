@@ -117,6 +117,19 @@ func (d *Deck) Shuffle() {
 	d.position = 0
 }
 
+// SetCards sets specific cards at the beginning of the deck for testing purposes.
+// It resets the draw position to 0.
+func (d *Deck) SetCards(cards []Card) {
+	for i, c := range cards {
+		if i >= len(d.cards) {
+			break
+		}
+		d.cards[i] = c
+	}
+	d.position = 0
+}
+
+
 // Draw mengambil satu kartu dari atas deck.
 // Panic jika deck habis — ini seharusnya tidak terjadi dalam permainan
 // poker normal (max 8 pemain × 2 + 5 community + 3 burn = 24 kartu).

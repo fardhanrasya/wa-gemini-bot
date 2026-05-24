@@ -20,14 +20,15 @@ wa-session.db-wal
 *.pem
 
 # Folders
-.ideas/
 .devdocs/
 .bugs/
+.ideas/
 
 # Docker
 .dockerignore
 
 # IDE
+.kiro/
 .vscode/
 .idea/
 *.swp

@@ -24,7 +24,7 @@ import (
 // ==========================================================================
 
 // handlePokerMention memproses command poker yang di-mention.
-// Contoh: "@Abdul poker", "@Abdul ikut", "@Abdul mulai", "@Abdul stop", "@Abdul status"
+// Contoh: "@Abdul poker", "@Abdul ikut", "@Abdul mulai", "@Abdul status"
 //
 // Return true jika pesan di-handle sebagai perintah poker.
 func (b *Bot) handlePokerMention(ctx *eventContext) bool {

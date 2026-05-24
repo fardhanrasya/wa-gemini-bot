@@ -96,13 +96,25 @@ func (s *PokerService) IsActive(groupJID string) bool {
 	return ok
 }
 
+// IsPlayerInGame mengembalikan true jika pemain dengan nama senderName sedang aktif di meja poker grup ini.
+func (s *PokerService) IsPlayerInGame(groupJID, senderName string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[groupJID]
+	if !ok {
+		return false
+	}
+	return session.game.GetPlayerJID(senderName) != ""
+}
+
+
 // ==========================================================================
 // Command handling — entry point dari Bot
 // ==========================================================================
 
 // pokerCommandRegex mencocokkan perintah poker saat di-mention.
-// Contoh: "poker", "poker help", "poker guide", "ikut 1000", "mulai", "stop", "status", "pause", "lanjut", "resume", "keluar", "leave"
-var pokerCommandRegex = regexp.MustCompile(`(?i)^(poker(?:\s+(?:help|guide))?|ikut(?:\s+\d+)?|mulai|stop|status|pause|lanjut|resume|keluar|leave)$`)
+// Contoh: "poker", "poker help", "poker guide", "ikut 1000", "mulai", "status", "pause", "lanjut", "resume", "keluar", "leave"
+var pokerCommandRegex = regexp.MustCompile(`(?i)^(poker(?:\s+(?:help|guide))?|ikut(?:\s+\d+)?|mulai|status|pause|lanjut|resume|keluar|leave)$`)
 
 // actionRegex mencocokkan aksi poker (tanpa mention).
 // Contoh: "fold", "check", "call", "raise 100", "bet 50", "allin"
@@ -150,8 +162,6 @@ func (s *PokerService) HandleMentionCommand(groupJID, senderName, senderJID, tex
 		s.handleJoin(groupJID, senderName, senderJID, amount)
 	case "mulai":
 		s.handleStartGame(groupJID, senderName)
-	case "stop":
-		s.handleStop(groupJID, senderName)
 	case "status":
 		s.handleStatus(groupJID)
 	case "pause":
@@ -180,8 +190,6 @@ func (s *PokerService) handlePokerHelp(groupJID string) {
 		"   Memulai permainan (minimal 2 pemain).\n" +
 		"👉 `@bot status`\n" +
 		"   Melihat status permainan saat ini, kartu meja, dan sisa chip pemain.\n" +
-		"👉 `@bot stop`\n" +
-		"   Menghentikan permainan secara paksa dan mengembalikan seluruh chip ke saldo.\n" +
 		"👉 `@bot keluar` / `@bot leave`\n" +
 		"   Keluar dari permainan dan menarik sisa chip kembali ke saldo.\n" +
 		"👉 `@bot pause`\n" +
@@ -422,34 +430,6 @@ func (s *PokerService) handleStartGame(groupJID, senderName string) {
 	s.startNewRound(groupJID)
 }
 
-func (s *PokerService) handleStop(groupJID, senderName string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	session, ok := s.sessions[groupJID]
-	if !ok {
-		s.sendGroup(groupJID, "❌ Tidak ada game poker yang berjalan.")
-		return
-	}
-
-	// Refund semua chip yang ada di meja
-	refunds := session.game.RefundAll()
-	if s.onAddBalance != nil {
-		for name, amount := range refunds {
-			jid := session.game.GetPlayerJID(name)
-			if jid != "" {
-				_ = s.onAddBalance(jid, amount, "poker_stop_refund", groupJID)
-			}
-		}
-	}
-
-	// Cleanup timers
-	s.cleanupSession(session)
-	delete(s.sessions, groupJID)
-
-	s.sendGroup(groupJID, fmt.Sprintf("🛑 Game poker dihentikan oleh %s. Seluruh chip di meja telah dikembalikan ke saldo masing-masing.", senderName))
-	s.recordMem(groupJID, "bot (Bot)", "[Poker dihentikan oleh "+senderName+"]")
-}
 
 func (s *PokerService) handleLeave(groupJID, senderName string) {
 	s.mu.Lock()
@@ -866,7 +846,7 @@ func (s *PokerService) handleRoundOver(groupJID string, result ActionResult, fin
 	if ok {
 		session.game.PrepareNextRound()
 		delay := time.Duration(s.autoNextRoundSec) * time.Second
-		finalMsg.WriteString(fmt.Sprintf("\n\n🔄 Ronde berikutnya dalam %d detik...\n   Ketik @bot stop untuk berhenti.", s.autoNextRoundSec))
+		finalMsg.WriteString(fmt.Sprintf("\n\n🔄 Ronde berikutnya dalam %d detik...", s.autoNextRoundSec))
 		session.roundTimer = time.AfterFunc(delay, func() {
 			s.startNewRound(groupJID)
 		})
