@@ -51,6 +51,9 @@ type Config struct {
 
 	// Cloudinary
 	CloudinaryURL string
+
+	// Admin Panel (HTTP) — kosong = panel dinonaktifkan
+	AdminPanelToken string
 }
 
 // LoadConfig membaca konfigurasi dari .env dan environment variables.
@@ -186,6 +189,7 @@ func LoadConfig() (*Config, error) {
 	}
 
 	cloudinaryURL := os.Getenv("CLOUDINARY_URL")
+	adminPanelToken := strings.TrimSpace(os.Getenv("ADMIN_PANEL_TOKEN"))
 
 	return &Config{
 		GeminiAPIKey:     apiKey,
@@ -217,7 +221,8 @@ func LoadConfig() (*Config, error) {
 		BlackjackTurnTimeoutSec:   blackjackTurnTimeout,
 		BlackjackAutoNextRoundSec: blackjackAutoNextRound,
 
-		CloudinaryURL: cloudinaryURL,
+		CloudinaryURL:   cloudinaryURL,
+		AdminPanelToken: adminPanelToken,
 	}, nil
 }
 

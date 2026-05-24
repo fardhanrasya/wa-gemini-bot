@@ -251,7 +251,7 @@ func (s *BlackjackService) handleNewLobby(groupJID, senderName, senderJID string
 			"Siapa yang ingin ikut bermain? Ketik:\n"+
 			"👉 *@bot bj ikut <jumlah_taruhan>*\n\n"+
 			"• Maksimal 7 pemain per meja.\n"+
-			"• Game akan dimulai otomatis dalam *10 detik*,\n"+
+			"• Game akan dimulai otomatis dalam *60 detik*,\n"+
 			"  atau ketik *@bot bj mulai* jika semua sudah siap.",
 		senderName,
 	)
@@ -689,7 +689,9 @@ func (s *BlackjackService) handleDouble(groupJID, senderName string) {
 		s.mu.Unlock()
 		s.sendGroup(groupJID, "❌ "+err.Error())
 		s.mu.Lock()
-		s.startTurnTimer(groupJID, session)
+		if session, ok = s.sessions[groupJID]; ok {
+			s.startTurnTimer(groupJID, session)
+		}
 		s.mu.Unlock()
 		return
 	}
@@ -770,14 +772,22 @@ func (s *BlackjackService) processActionResult(groupJID string, res *ActionResul
 
 func (s *BlackjackService) playDealerTurn(groupJID string) {
 	s.mu.Lock()
+	_, ok := s.sessions[groupJID]
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+
+	s.sendGroup(groupJID, "🎰 *Giliran Dealer!* Membuka kartu tertutup...")
+	time.Sleep(1500 * time.Millisecond)
+
+	s.mu.Lock()
 	session, ok := s.sessions[groupJID]
 	if !ok {
 		s.mu.Unlock()
 		return
 	}
-
-	s.sendGroup(groupJID, "🎰 *Giliran Dealer!* Membuka kartu tertutup...")
-	time.Sleep(1500 * time.Millisecond)
 
 	res := session.game.PlayDealerTurn()
 	results := session.game.DetermineWinners()

@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,20 +34,59 @@ func (b *Bot) StartHTTPServer(port string) {
 		w.Write([]byte("OK"))
 	})
 
-	// Web Admin Panel UI
-	mux.HandleFunc("/admin", b.handleAdminPanelHTML)
-
-	// Admin Panel APIs
-	mux.HandleFunc("/admin/api/status", b.handleAdminAPIStatus)
-	mux.HandleFunc("/admin/api/groups", b.handleAdminAPIGroups)
-	mux.HandleFunc("/admin/api/broadcast", b.handleAdminAPIBroadcast)
-	mux.HandleFunc("/admin/api/users", b.handleAdminAPIUsers)
-	mux.HandleFunc("/admin/api/edit-balance", b.handleAdminAPIEditBalance)
+	// Web Admin Panel UI & APIs (memerlukan ADMIN_PANEL_TOKEN)
+	if b.config.AdminPanelToken == "" {
+		log.Printf("[ADMIN] Admin panel dinonaktifkan — set ADMIN_PANEL_TOKEN di .env untuk mengaktifkan")
+	} else {
+		mux.HandleFunc("/admin", b.withAdminAuth(b.handleAdminPanelHTML))
+		mux.HandleFunc("/admin/api/status", b.withAdminAuth(b.handleAdminAPIStatus))
+		mux.HandleFunc("/admin/api/groups", b.withAdminAuth(b.handleAdminAPIGroups))
+		mux.HandleFunc("/admin/api/broadcast", b.withAdminAuth(b.handleAdminAPIBroadcast))
+		mux.HandleFunc("/admin/api/users", b.withAdminAuth(b.handleAdminAPIUsers))
+		mux.HandleFunc("/admin/api/edit-balance", b.withAdminAuth(b.handleAdminAPIEditBalance))
+	}
 
 	log.Printf("[ADMIN] Unified HTTP Server listening on port %s", port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Printf("[ADMIN] Unified HTTP Server error: %v", err)
 	}
+}
+
+// withAdminAuth membungkus handler admin agar hanya dapat diakses dengan token yang valid.
+func (b *Bot) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		expected := b.config.AdminPanelToken
+		if expected == "" {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"Admin panel is not configured"}`, http.StatusServiceUnavailable)
+			return
+		}
+		if !adminTokenMatches(r, expected) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("WWW-Authenticate", `Bearer realm="admin"`)
+			http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func adminTokenMatches(r *http.Request, expected string) bool {
+	got := adminTokenFromRequest(r)
+	if got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(expected)) == 1
+}
+
+func adminTokenFromRequest(r *http.Request) string {
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimSpace(auth[7:])
+	}
+	if t := strings.TrimSpace(r.Header.Get("X-Admin-Token")); t != "" {
+		return t
+	}
+	return ""
 }
 
 // handleAdminAPIStatus mengembalikan status bot umum dalam format JSON.
@@ -787,6 +827,46 @@ const adminPanelHTML = `<!DOCTYPE html>
             color: var(--accent-purple);
         }
 
+        /* ADMIN LOGIN */
+        .login-overlay {
+            position: fixed;
+            inset: 0;
+            background-color: rgba(9, 13, 22, 0.95);
+            backdrop-filter: blur(8px);
+            z-index: 200;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 1rem;
+        }
+
+        .login-overlay.hidden {
+            display: none;
+        }
+
+        .login-card {
+            background-color: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 2rem;
+            width: 100%;
+            max-width: 420px;
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }
+
+        .login-card h2 {
+            font-size: 1.25rem;
+            font-weight: 700;
+        }
+
+        .login-card p {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-top: -0.5rem;
+        }
+
         /* RESPONSIVE DESIGN */
         @media (max-width: 900px) {
             .container {
@@ -941,6 +1021,19 @@ const adminPanelHTML = `<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- ADMIN TOKEN LOGIN -->
+    <div class="login-overlay" id="login-overlay">
+        <div class="login-card">
+            <h2>🔐 Admin Panel</h2>
+            <p>Masukkan token admin (<code>ADMIN_PANEL_TOKEN</code> dari file .env).</p>
+            <div class="form-group">
+                <label for="admin-token-input">Token</label>
+                <input type="password" id="admin-token-input" placeholder="Bearer token..." autocomplete="current-password">
+            </div>
+            <button type="button" class="btn" onclick="submitAdminLogin()">Masuk</button>
+        </div>
+    </div>
+
     <!-- TOAST NOTIFICATION -->
     <div class="toast" id="toast-notif">
         <span id="toast-icon">ℹ️</span>
@@ -954,8 +1047,57 @@ const adminPanelHTML = `<!DOCTYPE html>
         let selectedJID = '';
         let selectedAction = 'add'; // 'add', 'subtract', 'set'
 
+        const ADMIN_TOKEN_KEY = 'adminPanelToken';
+
+        function getAdminToken() {
+            return sessionStorage.getItem(ADMIN_TOKEN_KEY) || '';
+        }
+
+        function showLoginOverlay() {
+            document.getElementById('login-overlay').classList.remove('hidden');
+        }
+
+        function hideLoginOverlay() {
+            document.getElementById('login-overlay').classList.add('hidden');
+        }
+
+        function submitAdminLogin() {
+            const token = document.getElementById('admin-token-input').value.trim();
+            if (!token) {
+                showToast('❌ Token tidak boleh kosong.', 'error');
+                return;
+            }
+            sessionStorage.setItem(ADMIN_TOKEN_KEY, token);
+            hideLoginOverlay();
+            fetchStatus();
+            fetchGroups();
+        }
+
+        function adminFetch(url, options = {}) {
+            const token = getAdminToken();
+            if (!token) {
+                showLoginOverlay();
+                return Promise.reject(new Error('Not authenticated'));
+            }
+            options.headers = Object.assign({}, options.headers, {
+                'Authorization': 'Bearer ' + token
+            });
+            return fetch(url, options).then(res => {
+                if (res.status === 401) {
+                    sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+                    showLoginOverlay();
+                }
+                return res;
+            });
+        }
+
         // INITIALIZATION
         window.addEventListener('DOMContentLoaded', () => {
+            if (!getAdminToken()) {
+                showLoginOverlay();
+                return;
+            }
+            hideLoginOverlay();
             fetchStatus();
             fetchGroups();
         });
@@ -973,7 +1115,7 @@ const adminPanelHTML = `<!DOCTYPE html>
         // FETCH STATUS INFO
         async function fetchStatus() {
             try {
-                const res = await fetch('/admin/api/status');
+                const res = await adminFetch('/admin/api/status');
                 const data = await res.json();
                 
                 document.getElementById('stat-groups').textContent = data.groups_count;
@@ -994,7 +1136,7 @@ const adminPanelHTML = `<!DOCTYPE html>
         // FETCH ALLOWED GROUPS
         async function fetchGroups() {
             try {
-                const res = await fetch('/admin/api/groups');
+                const res = await adminFetch('/admin/api/groups');
                 groups = await res.json();
                 
                 const select = document.getElementById('broadcast-group');
@@ -1019,7 +1161,7 @@ const adminPanelHTML = `<!DOCTYPE html>
                 tableBody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-secondary);">Memuat data pemain...</td></tr>';
                 
                 const query = document.getElementById('search-input').value;
-                const res = await fetch("/admin/api/users?q=" + encodeURIComponent(query));
+                const res = await adminFetch("/admin/api/users?q=" + encodeURIComponent(query));
                 users = await res.json();
                 
                 tableBody.innerHTML = '';
@@ -1076,7 +1218,7 @@ const adminPanelHTML = `<!DOCTYPE html>
             btn.textContent = '⏳ Mengirim siaran...';
             
             try {
-                const res = await fetch('/admin/api/broadcast', {
+                const res = await adminFetch('/admin/api/broadcast', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ group_jid: targetGroup, message: message })
@@ -1133,7 +1275,7 @@ const adminPanelHTML = `<!DOCTYPE html>
             btn.disabled = true;
             
             try {
-                const res = await fetch('/admin/api/edit-balance', {
+                const res = await adminFetch('/admin/api/edit-balance', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ jid: selectedJID, amount: amount, action: selectedAction })
