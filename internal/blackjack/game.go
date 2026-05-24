@@ -152,9 +152,9 @@ func NewBlackjackGame() *BlackjackGame {
 	}
 }
 
-// AddPlayer adds a player to the game (only in lobby phase)
+// AddPlayer adds a player to the game (lobby, jeda antar-ronde, atau buy-in ulang saat meja kosong).
 func (g *BlackjackGame) AddPlayer(name, jid string, chips int) error {
-	if g.Phase != PhaseLobby {
+	if g.Phase != PhaseLobby && g.Phase != PhaseFinished {
 		return ErrGameNotInLobby
 	}
 

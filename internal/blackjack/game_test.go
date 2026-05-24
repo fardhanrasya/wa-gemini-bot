@@ -68,7 +68,7 @@ func TestDuplicatePlayerRejection(t *testing.T) {
 	}
 }
 
-// TestAddPlayerOnlyInLobby verifies players can only be added in lobby phase
+// TestAddPlayerOnlyInLobby verifies players can join in lobby/finished but not mid-round.
 func TestAddPlayerOnlyInLobby(t *testing.T) {
 	game := NewBlackjackGame()
 
@@ -78,13 +78,39 @@ func TestAddPlayerOnlyInLobby(t *testing.T) {
 		t.Fatalf("Failed to add player in lobby: %v", err)
 	}
 
-	// Change phase
-	game.Phase = PhasePlayerTurns
-
-	// Should fail in non-lobby phase
+	// Should work in finished phase (buy-in ulang / jeda antar ronde)
+	game.Phase = PhaseFinished
 	err = game.AddPlayer("Bob", "bob@test.com", 100)
+	if err != nil {
+		t.Errorf("Adding player in finished phase should succeed, got: %v", err)
+	}
+
+	// Should fail mid-round
+	game.Phase = PhasePlayerTurns
+	err = game.AddPlayer("Charlie", "charlie@test.com", 100)
 	if err != ErrGameNotInLobby {
-		t.Errorf("Adding player in non-lobby phase should return ErrGameNotInLobby, got: %v", err)
+		t.Errorf("Adding player mid-round should return ErrGameNotInLobby, got: %v", err)
+	}
+}
+
+// TestRebuyAfterBust simulates kicked player re-joining empty table in grace/finished phase.
+func TestRebuyAfterBust(t *testing.T) {
+	game := NewBlackjackGame()
+	_ = game.AddPlayer("Alice", "alice@test.com", 100)
+	game.Phase = PhaseFinished
+	game.RemovePlayer("Alice")
+
+	if game.PlayerCount() != 0 {
+		t.Fatalf("player count = %d; want 0", game.PlayerCount())
+	}
+
+	err := game.AddPlayer("Alice", "alice@test.com", 200)
+	if err != nil {
+		t.Fatalf("re-buy after bust should succeed, got: %v", err)
+	}
+	alice := game.GetPlayer("Alice")
+	if alice == nil || alice.Chips != 200 || alice.Bet != 200 {
+		t.Fatalf("rebuy player state wrong: %+v", alice)
 	}
 }
 

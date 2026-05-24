@@ -342,6 +342,7 @@ func (s *BlackjackService) handleJoin(groupJID, senderName, senderJID string, be
 		s.sendGroup(groupJID, "❌ Meja sudah penuh (maksimal 7 pemain).")
 		return
 	}
+	wasEmptyTable := session.game.PlayerCount() == 0
 	s.mu.Unlock()
 
 	if s.onSubtractBalance != nil {
@@ -394,6 +395,22 @@ func (s *BlackjackService) handleJoin(groupJID, senderName, senderJID string, be
 	var balanceLine string
 	if p != nil {
 		balanceLine = formatPlayerBalance(p)
+	}
+
+	// Meja kosong (grace setelah bust): batalkan penutupan sesi, kembali ke lobby
+	if wasEmptyTable {
+		session.game.Phase = PhaseLobby
+		if session.roundTimer != nil {
+			session.roundTimer.Stop()
+			session.roundTimer = nil
+		}
+		if session.lobbyTimer != nil {
+			session.lobbyTimer.Stop()
+		}
+		session.lobbyTimer = time.AfterFunc(60*time.Second, func() {
+			s.handleLobbyTimeout(groupJID)
+		})
+		phase = PhaseLobby
 	}
 	s.mu.Unlock()
 
