@@ -1,4 +1,4 @@
-.PHONY: help build start stop restart logs status update clean reset-session backup test prod-start prod-stop prod-logs prod-restart prod-update
+.PHONY: help build start stop restart logs status update clean reset-session backup test prod-start prod-stop prod-logs prod-restart prod-update update-ngrok prod-ngrok
 
 # Default target
 help:
@@ -12,6 +12,7 @@ help:
 	@echo "  make logs               Show logs (real-time)"
 	@echo "  make status             Show container status"
 	@echo "  make update             Update bot (git pull + rebuild + restart)"
+	@echo "  make update-ngrok       Auto-detect Ngrok URL & restart development bot"
 	@echo "  make clean              Remove container and image"
 	@echo "  make reset-session      Reset WhatsApp session"
 	@echo ""
@@ -26,6 +27,8 @@ help:
 	@echo "  make prod-logs          Show production logs"
 	@echo "  make prod-restart       Restart production"
 	@echo "  make prod-update        Update production (git pull + rebuild + restart)"
+	@echo "  make prod-ngrok         Auto-detect Ngrok URL & restart production bot"
+
 
 # Setup
 setup:
@@ -138,6 +141,46 @@ prod-update:
 	@echo "4. Starting bot..."
 	docker-compose -f docker/docker-compose.prod.yml up -d
 	@echo " Production update complete"
+
+# Ngrok auto-updating shortcuts (No rebuild needed!)
+update-ngrok:
+	@echo "🔄 Mendeteksi URL Ngrok aktif..."
+	@URL=$$(curl -s http://127.0.0.1:4040/api/tunnels | grep -o '"public_url":"[^"]*' | head -n 1 | cut -d'"' -f4); \
+	if [ -z "$$URL" ]; then \
+		echo "❌ Gagal mendeteksi URL ngrok. Pastikan ngrok sudah berjalan di port 8080!"; \
+		exit 1; \
+	fi; \
+	echo "🔗 Terdeteksi URL Ngrok: $$URL"; \
+	sed -i.bak 's|^DOKU_WEBHOOK_URL=.*|DOKU_WEBHOOK_URL='$$URL'/doku/webhook|g' .env; \
+	if grep -q "^WEB_PUBLIC_URL=" .env; then \
+		sed -i 's|^WEB_PUBLIC_URL=.*|WEB_PUBLIC_URL='$$URL'|g' .env; \
+	else \
+		echo "WEB_PUBLIC_URL="$$URL >> .env; \
+	fi; \
+	rm -f .env.bak; \
+	echo "📝 File .env berhasil diperbarui!"; \
+	echo "⚡ Merestart container bot (Development) untuk memuat konfigurasi baru..."; \
+	docker-compose -f docker/docker-compose.yml restart
+
+prod-ngrok:
+	@echo "🔄 Mendeteksi URL Ngrok aktif..."
+	@URL=$$(curl -s http://127.0.0.1:4040/api/tunnels | grep -o '"public_url":"[^"]*' | head -n 1 | cut -d'"' -f4); \
+	if [ -z "$$URL" ]; then \
+		echo "❌ Gagal mendeteksi URL ngrok. Pastikan ngrok sudah berjalan di port 8080!"; \
+		exit 1; \
+	fi; \
+	echo "🔗 Terdeteksi URL Ngrok: $$URL"; \
+	sed -i.bak 's|^DOKU_WEBHOOK_URL=.*|DOKU_WEBHOOK_URL='$$URL'/doku/webhook|g' .env; \
+	if grep -q "^WEB_PUBLIC_URL=" .env; then \
+		sed -i 's|^WEB_PUBLIC_URL=.*|WEB_PUBLIC_URL='$$URL'|g' .env; \
+	else \
+		echo "WEB_PUBLIC_URL="$$URL >> .env; \
+	fi; \
+	rm -f .env.bak; \
+	echo "📝 File .env berhasil diperbarui!"; \
+	echo "⚡ Merestart container bot (Production) untuk memuat konfigurasi baru..."; \
+	docker-compose -f docker/docker-compose.prod.yml restart
+
 
 # Backup
 backup:

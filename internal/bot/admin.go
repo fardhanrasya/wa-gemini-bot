@@ -13,6 +13,8 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"google.golang.org/protobuf/proto"
+
+	"wa-gemini-bot/internal/mining"
 )
 
 // StartHTTPServer memulai HTTP server gabungan untuk webhook DOKU dan Admin Panel.
@@ -34,11 +36,33 @@ func (b *Bot) StartHTTPServer(port string) {
 		w.Write([]byte("OK"))
 	})
 
+	// Web Dashboard Pertambangan
+	if b.mining != nil {
+		handler := mining.NewWebHandler(b.mining)
+		
+		// Halaman UI
+		mux.HandleFunc("/mining", handler.HandleDashboard)
+		mux.HandleFunc("/mining/public", handler.HandlePublicDashboard)
+		mux.HandleFunc("/mining/login", handler.HandleLogin)
+		
+		// API JSON
+		mux.HandleFunc("/mining/api/status", handler.HandleAPIStatus)
+		mux.HandleFunc("/mining/api/public-list", handler.HandleAPIPublicList)
+		mux.HandleFunc("/mining/api/claim", handler.HandleAPIClaim)
+		mux.HandleFunc("/mining/api/buy", handler.HandleAPIBuy)
+		mux.HandleFunc("/mining/api/logout", handler.HandleAPILogout)
+		
+		log.Printf("[MINING] Web Dashboard routes registered successfully")
+	}
+
 	// Web Admin Panel UI & APIs (memerlukan ADMIN_PANEL_TOKEN)
 	if b.config.AdminPanelToken == "" {
 		log.Printf("[ADMIN] Admin panel dinonaktifkan — set ADMIN_PANEL_TOKEN di .env untuk mengaktifkan")
 	} else {
-		mux.HandleFunc("/admin", b.withAdminAuth(b.handleAdminPanelHTML))
+		// Sajikan HTML secara publik agar browser dapat merender UI & memicu prompt login modal.
+		// Keamanan tetap terjamin karena setiap REST API di bawah ini tetap di-wrap dengan withAdminAuth secara ketat.
+		mux.HandleFunc("/admin", b.handleAdminPanelHTML)
+		
 		mux.HandleFunc("/admin/api/status", b.withAdminAuth(b.handleAdminAPIStatus))
 		mux.HandleFunc("/admin/api/groups", b.withAdminAuth(b.handleAdminAPIGroups))
 		mux.HandleFunc("/admin/api/broadcast", b.withAdminAuth(b.handleAdminAPIBroadcast))

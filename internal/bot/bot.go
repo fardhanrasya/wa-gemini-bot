@@ -13,6 +13,7 @@ import (
 	"wa-gemini-bot/internal/media"
 	"wa-gemini-bot/internal/memory"
 	"wa-gemini-bot/internal/blackjack"
+	"wa-gemini-bot/internal/mining"
 	"wa-gemini-bot/internal/payment"
 	"wa-gemini-bot/internal/poker"
 	"wa-gemini-bot/internal/trivia"
@@ -47,6 +48,7 @@ type Bot struct {
 	blackjack *blackjack.BlackjackService // nil jika fitur blackjack tidak aktif
 	eco       *economy.EconomyService
 	cld    *media.CloudinaryService // nil jika tidak dikonfigurasi
+	mining *mining.MiningService
 }
 
 // eventContext mengumpulkan data yang sudah di-parse dari satu pesan masuk.
@@ -81,6 +83,11 @@ func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku 
 	clientLog := waLog.Stdout("Client", "WARN", true)
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 
+	var mineSvc *mining.MiningService
+	if eco != nil {
+		mineSvc = mining.NewMiningService(eco)
+	}
+
 	bot := &Bot{
 		client: client,
 		ai:     ai,
@@ -92,6 +99,7 @@ func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku 
 		blackjack: blackjack,
 		eco:       eco,
 		cld:       cld,
+		mining:    mineSvc,
 	}
 
 	client.AddEventHandler(bot.handleEvent)
@@ -320,6 +328,7 @@ func (b *Bot) handleEconomy(ctx *eventContext) bool {
 
 		sb.WriteString("💰 *EKONOMI & PROFIL*\n")
 		sb.WriteString("* `@bot saldo` : Cek saldo chip dan pangkat aktif Anda.\n")
+		sb.WriteString("* `@bot tambang` : Dapatkan link masuk personal ke Web Mining Rig Anda.\n")
 		sb.WriteString("* `@bot leaderboard` : Tampilkan 10 pemain terkaya di grup ini.\n")
 		sb.WriteString("* `@bot ranks` : Tampilkan seluruh daftar pangkat dan persyaratannya.\n")
 		sb.WriteString("* `@bot setname <nama>` : Ubah nama tampilan Anda di bot (maksimal 20 karakter).\n")
@@ -395,6 +404,41 @@ func (b *Bot) handleEconomy(ctx *eventContext) bool {
 		} else {
 			b.sendToGroup(ctx.chatJID, fmt.Sprintf("✅ Nama kustom kamu berhasil diubah menjadi: *%s*", newName))
 		}
+		return true
+	}
+
+	if cleanText == "tambang" || cleanText == "web" || cleanText == "login" || cleanText == "mining" {
+		if b.mining == nil {
+			b.sendToGroup(ctx.chatJID, "❌ Fitur pertambangan saat ini sedang dinonaktifkan.")
+			return true
+		}
+
+		token, err := b.mining.CreateLoginToken(senderJID)
+		if err != nil {
+			log.Printf("Gagal membuat token login: %v", err)
+			b.sendToGroup(ctx.chatJID, "❌ Maaf, gagal membuat token login saat ini.")
+			return true
+		}
+
+		magicLink := fmt.Sprintf("%s/mining/login?token=%s", b.config.WebPublicURL, token)
+
+		// Kirim pemberitahuan di grup chat dengan tag mention
+		b.sendToGroupWithMentions(ctx.chatJID, fmt.Sprintf("🔑 *DASHBOARD PERTAMBANGAN CHIP* 🔑\n\nHalo @%s, tautan login personal kamu sudah dikirim via Direct Message (DM) ya! Silakan periksa chat privatmu.", ctx.msg.Info.Sender.User), []string{senderJID})
+
+		// Kirim detail link login rahasia via DM
+		dmMsg := fmt.Sprintf(
+			"⚡ *DASHBOARD PERTAMBANGAN CHIP (ABDUL BOT)* ⚡\n\n"+
+				"Halo *%s*!\n"+
+				"Berikut adalah tautan masuk personal Anda untuk mengelola rig pertambangan virtual Anda:\n\n"+
+				"🔗 *Link Login*: %s\n\n"+
+				"⏰ *Catatan*:\n"+
+				"- Tautan ini bersifat *RAHASIA* dan hanya berlaku selama 1 jam.\n"+
+				"- Jangan membagikan tautan ini ke grup atau orang lain.\n"+
+				"- Buka di browser untuk memantau, menyewa rig baru, dan melakukan Refuel bahan bakar/baterai rig.",
+			ctx.senderName,
+			magicLink,
+		)
+		b.sendDM(senderJID, dmMsg)
 		return true
 	}
 

@@ -724,3 +724,48 @@ func TestWinnerDetermination(t *testing.T) {
 		t.Errorf("Eva result: Outcome=%s, Payout=%d; want lose, 0", rEva.Outcome, rEva.Payout)
 	}
 }
+
+// TestSinglePlayerNaturalBlackjack verifies that a single player getting a natural blackjack
+// transitions the game immediately to PhaseDealerTurn.
+func TestSinglePlayerNaturalBlackjack(t *testing.T) {
+	game := NewBlackjackGame()
+	err := game.AddPlayer("Alice", "alice@test.com", 1000)
+	if err != nil {
+		t.Fatalf("Failed to add player: %v", err)
+	}
+
+	// Rig the deck: Player gets (A♠, K♠) - Blackjack, Dealer gets (2♠, 7♠)
+	riggedDeck := NewDeck()
+	riggedDeck.SetCards([]Card{
+		{Rank: Ace, Suit: Spade},   // Player card 1
+		{Rank: Two, Suit: Spade},   // Dealer card 1
+		{Rank: King, Suit: Spade},  // Player card 2
+		{Rank: Seven, Suit: Spade}, // Dealer card 2
+	})
+	game.Deck = riggedDeck
+
+	_, err = game.StartRound()
+	if err != nil {
+		t.Fatalf("Failed to start round: %v", err)
+	}
+
+	// Verify the phase transitions immediately to PhaseDealerTurn (since all active players have blackjack)
+	if game.Phase != PhaseDealerTurn {
+		t.Errorf("Game phase = %v; want PhaseDealerTurn", game.Phase)
+	}
+
+	// Determine winners
+	results := game.DetermineWinners()
+	if len(results) != 1 {
+		t.Fatalf("Results length = %d; want 1", len(results))
+	}
+
+	res := results[0]
+	if res.Outcome != "blackjack" {
+		t.Errorf("Outcome = %s; want blackjack", res.Outcome)
+	}
+	if res.Payout != 2500 { // 2.5 * 1000 = 2500
+		t.Errorf("Payout = %d; want 2500", res.Payout)
+	}
+}
+

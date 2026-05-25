@@ -103,6 +103,56 @@ func NewEconomyService(dbPath string) (*EconomyService, error) {
 	// Migrasi database: tambahkan kolom name_is_custom secara aman jika belum ada
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN name_is_custom INTEGER DEFAULT 0;")
 
+	// ==========================================
+	// MIGRASI TABEL MINING WEB DASHBOARD
+	// ==========================================
+	
+	// Tabel mining_rigs
+	miningRigsTable := `
+	CREATE TABLE IF NOT EXISTS mining_rigs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		jid TEXT NOT NULL,
+		tier TEXT NOT NULL,
+		efficiency REAL NOT NULL,
+		chips_mined INTEGER DEFAULT 0,
+		max_durability INTEGER NOT NULL,
+		last_fuel_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	`
+	if _, err := db.Exec(miningRigsTable); err != nil {
+		return nil, fmt.Errorf("gagal membuat tabel mining_rigs: %w", err)
+	}
+
+	// Index untuk query cepat by JID
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_mining_rigs_jid ON mining_rigs(jid);`); err != nil {
+		return nil, fmt.Errorf("gagal membuat index mining_rigs: %w", err)
+	}
+
+	// Tabel web_login_tokens
+	webLoginTokensTable := `
+	CREATE TABLE IF NOT EXISTS web_login_tokens (
+		token TEXT PRIMARY KEY,
+		jid TEXT NOT NULL,
+		expires_at DATETIME NOT NULL
+	);
+	`
+	if _, err := db.Exec(webLoginTokensTable); err != nil {
+		return nil, fmt.Errorf("gagal membuat tabel web_login_tokens: %w", err)
+	}
+
+	// Tabel web_sessions
+	webSessionsTable := `
+	CREATE TABLE IF NOT EXISTS web_sessions (
+		session_id TEXT PRIMARY KEY,
+		jid TEXT NOT NULL,
+		expires_at DATETIME NOT NULL
+	);
+	`
+	if _, err := db.Exec(webSessionsTable); err != nil {
+		return nil, fmt.Errorf("gagal membuat tabel web_sessions: %w", err)
+	}
+
 	service := &EconomyService{
 		db: db,
 	}
@@ -595,4 +645,9 @@ func (s *EconomyService) SearchUsers(query string) ([]User, error) {
 		users = append(users, u)
 	}
 	return users, nil
+}
+
+// DB mengembalikan instance sql.DB untuk diakses oleh servis lain (seperti MiningService).
+func (s *EconomyService) DB() *sql.DB {
+	return s.db
 }

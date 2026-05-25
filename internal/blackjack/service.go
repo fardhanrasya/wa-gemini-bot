@@ -615,10 +615,10 @@ func (s *BlackjackService) startGame(groupJID string) {
 		return
 	}
 
-	// Cari pemain aktif pertama
+	// Cari pemain aktif pertama (hanya jika fase game adalah PhasePlayerTurns)
 	activePlayer := ""
 	activeJID := ""
-	if currentPlayerIdx < len(players) {
+	if phase == PhasePlayerTurns && currentPlayerIdx < len(players) {
 		activePlayer = players[currentPlayerIdx].name
 		activeJID = players[currentPlayerIdx].jid
 	}
