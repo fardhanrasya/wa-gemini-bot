@@ -1539,11 +1539,11 @@ const PublicDashboardHTML = `<!DOCTYPE html>
                     '<div class="player-header">' +
                         '<div class="player-identity">' +
                             '<span style="font-weight:800; opacity:0.3; font-size:1.1rem">#' + (index+1) + '</span>' +
-                            '<span class="player-name">' + escapeHTML(p.Name) + '</span>' +
-                            '<span class="player-rank">' + p.RankEmoji + ' ' + p.RankName + '</span>' +
+                            '<span class="player-name">' + escapeHTML(p.name || "Unknown") + '</span>' +
+                            '<span class="player-rank">' + (p.rank_emoji || "") + ' ' + (p.rank_name || "Unknown") + '</span>' +
                         '</div>' +
                         '<div class="player-total-rigs">' +
-                            '<span>Saldo: <b style="color:var(--accent-emerald)">' + formatNumber(p.Balance) + ' chip</b></span>' +
+                            '<span>Saldo: <b style="color:var(--accent-emerald)">' + formatNumber(p.balance || 0) + ' chip</b></span>' +
                             '<span style="opacity:0.3">|</span>' +
                             '<span>⚙️ ' + totalActive + ' Rig Aktif ' + (totalBroken > 0 ? ('(' + totalBroken + ' Rusak)') : '') + '</span>' +
                         '</div>' +
