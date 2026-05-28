@@ -15,6 +15,7 @@ import (
 	"wa-gemini-bot/internal/blackjack"
 	"wa-gemini-bot/internal/mining"
 	"wa-gemini-bot/internal/payment"
+	"wa-gemini-bot/internal/trading"
 	"wa-gemini-bot/internal/poker"
 	"wa-gemini-bot/internal/trivia"
 
@@ -49,6 +50,7 @@ type Bot struct {
 	eco       *economy.EconomyService
 	cld    *media.CloudinaryService // nil jika tidak dikonfigurasi
 	mining *mining.MiningService
+	trading *trading.TradingService
 }
 
 // eventContext mengumpulkan data yang sudah di-parse dari satu pesan masuk.
@@ -88,6 +90,11 @@ func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku 
 		mineSvc = mining.NewMiningService(eco)
 	}
 
+	var tradSvc *trading.TradingService
+	if eco != nil && cfg.TradingEnabled {
+		tradSvc = trading.NewTradingService(eco, cfg.TradingDebugPassword, cfg.TradingMinDeposit, cfg.TradingMinWithdraw)
+	}
+
 	bot := &Bot{
 		client: client,
 		ai:     ai,
@@ -100,6 +107,7 @@ func NewBot(cfg *config.Config, ai *ai.AIService, mem *memory.GroupMemory, doku 
 		eco:       eco,
 		cld:       cld,
 		mining:    mineSvc,
+		trading:   tradSvc,
 	}
 
 	client.AddEventHandler(bot.handleEvent)
@@ -329,6 +337,7 @@ func (b *Bot) handleEconomy(ctx *eventContext) bool {
 		sb.WriteString("💰 *EKONOMI & PROFIL*\n")
 		sb.WriteString("* `@bot saldo` : Cek saldo chip dan pangkat aktif Anda.\n")
 		sb.WriteString("* `@bot tambang` : Dapatkan link masuk personal ke Web Mining Rig Anda.\n")
+		sb.WriteString("* `@bot trading` : Dapatkan link masuk personal ke Web Trading Simulator Anda.\n")
 		sb.WriteString("* `@bot leaderboard` : Tampilkan 10 pemain terkaya di grup ini.\n")
 		sb.WriteString("* `@bot ranks` : Tampilkan seluruh daftar pangkat dan persyaratannya.\n")
 		sb.WriteString("* `@bot setname <nama>` : Ubah nama tampilan Anda di bot (maksimal 20 karakter).\n")
@@ -435,6 +444,41 @@ func (b *Bot) handleEconomy(ctx *eventContext) bool {
 				"- Tautan ini bersifat *RAHASIA* dan hanya berlaku selama 1 jam.\n"+
 				"- Jangan membagikan tautan ini ke grup atau orang lain.\n"+
 				"- Buka di browser untuk memantau, menyewa rig baru, dan melakukan Refuel bahan bakar/baterai rig.",
+			ctx.senderName,
+			magicLink,
+		)
+		b.sendDM(senderJID, dmMsg)
+		return true
+	}
+
+	if cleanText == "trading" || cleanText == "trade" || cleanText == "simulator" {
+		if b.trading == nil {
+			b.sendToGroup(ctx.chatJID, "❌ Fitur Trading Simulator saat ini sedang dinonaktifkan.")
+			return true
+		}
+
+		token, err := b.trading.CreateLoginToken(senderJID)
+		if err != nil {
+			log.Printf("Gagal membuat token login trading: %v", err)
+			b.sendToGroup(ctx.chatJID, "❌ Maaf, gagal membuat token login trading saat ini.")
+			return true
+		}
+
+		magicLink := fmt.Sprintf("%s/trading/login?token=%s", b.config.WebPublicURL, token)
+
+		// Kirim pemberitahuan di grup chat dengan tag mention
+		b.sendToGroupWithMentions(ctx.chatJID, fmt.Sprintf("🔑 *TRADING SIMULATOR* 🔑\n\nHalo @%s, tautan login personal kamu sudah dikirim via Direct Message (DM) ya! Silakan periksa chat privatmu.", ctx.msg.Info.Sender.User), []string{senderJID})
+
+		// Kirim detail link login rahasia via DM
+		dmMsg := fmt.Sprintf(
+			"⚡ *TRADING SIMULATOR (ABDUL BOT)* ⚡\n\n"+
+				"Halo *%s*!\n"+
+				"Berikut adalah tautan masuk personal Anda untuk bermain Trading Simulator:\n\n"+
+				"🔗 *Link Login*: %s\n\n"+
+				"⏰ *Catatan*:\n"+
+				"- Tautan ini bersifat *RAHASIA* dan hanya berlaku selama 1 jam.\n"+
+				"- Jangan membagikan tautan ini ke grup atau orang lain.\n"+
+				"- Buka di browser untuk menganalisa chart, membuka posisi (Long/Short), memasang Stop Loss/Take Profit, dan bersaing menjadi trader terbaik!",
 			ctx.senderName,
 			magicLink,
 		)

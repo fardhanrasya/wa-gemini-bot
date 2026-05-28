@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"wa-gemini-bot/internal/mining"
+	"wa-gemini-bot/internal/trading"
 )
 
 // StartHTTPServer memulai HTTP server gabungan untuk webhook DOKU dan Admin Panel.
@@ -53,6 +54,21 @@ func (b *Bot) StartHTTPServer(port string) {
 		mux.HandleFunc("/mining/api/logout", handler.HandleAPILogout)
 		
 		log.Printf("[MINING] Web Dashboard routes registered successfully")
+	}
+
+	// Web Dashboard Trading Simulator
+	if b.trading != nil {
+		handler := trading.NewWebHandler(b.trading)
+		
+		// Halaman UI
+		mux.HandleFunc("/trading", handler.HandleDashboard)
+		mux.HandleFunc("/trading/login-required", handler.HandleLoginRequired)
+		mux.HandleFunc("/trading/login", handler.HandleLogin)
+		
+		// API JSON
+		mux.HandleFunc("/trading/api/", handler.HandleAPI)
+		
+		log.Printf("[TRADING] Web Dashboard routes registered successfully")
 	}
 
 	// Web Admin Panel UI & APIs (memerlukan ADMIN_PANEL_TOKEN)

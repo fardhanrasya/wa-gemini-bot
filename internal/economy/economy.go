@@ -153,6 +153,80 @@ func NewEconomyService(dbPath string) (*EconomyService, error) {
 		return nil, fmt.Errorf("gagal membuat tabel web_sessions: %w", err)
 	}
 
+	// ==========================================
+	// MIGRASI TABEL TRADING SIMULATOR
+	// ==========================================
+	tradingBalancesTable := `
+	CREATE TABLE IF NOT EXISTS trading_balances (
+		jid TEXT PRIMARY KEY,
+		balance INTEGER DEFAULT 0,
+		total_deposited INTEGER DEFAULT 0,
+		total_withdrawn INTEGER DEFAULT 0,
+		total_profit INTEGER DEFAULT 0,
+		total_loss INTEGER DEFAULT 0,
+		total_sessions INTEGER DEFAULT 0,
+		total_trades INTEGER DEFAULT 0,
+		tutorial_step INTEGER DEFAULT 0,
+		tutorial_completed INTEGER DEFAULT 0
+	);
+	`
+	if _, err := db.Exec(tradingBalancesTable); err != nil {
+		return nil, fmt.Errorf("gagal membuat tabel trading_balances: %w", err)
+	}
+
+	tradingSessionsTable := `
+	CREATE TABLE IF NOT EXISTS trading_sessions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		jid TEXT NOT NULL,
+		seed INTEGER NOT NULL,
+		pattern_type TEXT NOT NULL,
+		pattern_name TEXT NOT NULL,
+		pattern_resolved INTEGER NOT NULL,
+		noise_level REAL NOT NULL,
+		total_pnl INTEGER DEFAULT 0,
+		start_time DATETIME NOT NULL,
+		end_time DATETIME,
+		status TEXT NOT NULL
+	);
+	`
+	if _, err := db.Exec(tradingSessionsTable); err != nil {
+		return nil, fmt.Errorf("gagal membuat tabel trading_sessions: %w", err)
+	}
+
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_trading_sessions_jid ON trading_sessions(jid);`); err != nil {
+		return nil, fmt.Errorf("gagal membuat index trading_sessions_jid: %w", err)
+	}
+
+	tradingTradesTable := `
+	CREATE TABLE IF NOT EXISTS trading_trades (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_id INTEGER NOT NULL,
+		jid TEXT NOT NULL,
+		direction TEXT NOT NULL,
+		leverage INTEGER NOT NULL,
+		size INTEGER NOT NULL,
+		entry_price REAL NOT NULL,
+		exit_price REAL,
+		stop_loss REAL,
+		take_profit REAL,
+		trailing_stop REAL,
+		pnl INTEGER DEFAULT 0,
+		status TEXT NOT NULL,
+		opened_at DATETIME NOT NULL,
+		closed_at DATETIME
+	);
+	`
+	if _, err := db.Exec(tradingTradesTable); err != nil {
+		return nil, fmt.Errorf("gagal membuat tabel trading_trades: %w", err)
+	}
+
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_trading_trades_jid ON trading_trades(jid);`); err != nil {
+		return nil, fmt.Errorf("gagal membuat index idx_trading_trades_jid: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_trading_trades_session_id ON trading_trades(session_id);`); err != nil {
+		return nil, fmt.Errorf("gagal membuat index idx_trading_trades_session_id: %w", err)
+	}
+
 	service := &EconomyService{
 		db: db,
 	}

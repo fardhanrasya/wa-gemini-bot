@@ -57,6 +57,12 @@ type Config struct {
 
 	// Web Dashboard Pertambangan
 	WebPublicURL string
+
+	// Trading Simulator
+	TradingEnabled       bool
+	TradingDebugPassword string
+	TradingMinDeposit    int
+	TradingMinWithdraw   int
 }
 
 // LoadConfig membaca konfigurasi dari .env dan environment variables.
@@ -200,6 +206,22 @@ func LoadConfig() (*Config, error) {
 	}
 	webPublicURL = strings.TrimSuffix(webPublicURL, "/")
 
+	// Trading Simulator Config — opsional. Default: nonaktif.
+	tradingEnabled := os.Getenv("TRADING_ENABLED") == "true" || os.Getenv("TRADING_ENABLED") == "1"
+	tradingDebugPwd := strings.TrimSpace(os.Getenv("TRADING_DEBUG_PASSWORD"))
+	tradingMinDeposit := 500
+	if v := os.Getenv("TRADING_MIN_DEPOSIT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			tradingMinDeposit = n
+		}
+	}
+	tradingMinWithdraw := 100
+	if v := os.Getenv("TRADING_MIN_WITHDRAW"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			tradingMinWithdraw = n
+		}
+	}
+
 	return &Config{
 		GeminiAPIKey:     apiKey,
 		GeminiModel:      model,
@@ -233,6 +255,11 @@ func LoadConfig() (*Config, error) {
 		CloudinaryURL:   cloudinaryURL,
 		AdminPanelToken: adminPanelToken,
 		WebPublicURL:    webPublicURL,
+
+		TradingEnabled:       tradingEnabled,
+		TradingDebugPassword: tradingDebugPwd,
+		TradingMinDeposit:    tradingMinDeposit,
+		TradingMinWithdraw:   tradingMinWithdraw,
 	}, nil
 }
 
